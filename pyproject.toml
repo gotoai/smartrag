@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smartrag"
+dynamic = ["version"]
+description = "A knowledge source any agent can use: search returns evidence with citations, the agent writes the answer."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "GOTOAI" }]
+keywords = ["rag", "retrieval", "search", "agents", "mcp", "embeddings"]
+# TODO: choose the licence (open framework vs commercial implementation) and add
+# `license = "..."` + `license-files = ["LICENSE"]`.
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "fastapi>=0.110",    # the query-plane Web API
+    "uvicorn>=0.29",
+    "typer>=0.12",       # single CLI: serve now; admin commands (source, jobs, apikey, ...) later
+]
+
+[project.urls]
+Homepage = "https://github.com/gotoai/smartrag"
+Repository = "https://github.com/gotoai/smartrag"
+Issues = "https://github.com/gotoai/smartrag/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "httpx2>=2",         # FastAPI's TestClient (Starlette deprecated plain httpx for it)
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+smartrag = "smartrag.cli.main:main"
+
+[tool.hatch.version]
+path = "src/smartrag/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smartrag"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI / typer declare parameters through calls in defaults; that is their idiom.
+extend-immutable-calls = [
+    "fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "typer.Option",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

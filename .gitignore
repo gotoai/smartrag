@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual envs / tooling
+.venv/
+venv/
+.env
+.uv/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Local secrets (API key stores written by the CLI)
+api_keys.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
