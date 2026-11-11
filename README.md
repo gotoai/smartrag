@@ -3,9 +3,11 @@
 A knowledge source any agent can use. **Search returns evidence** (snippets, stable ids,
 citations); the agent, or a person at the search box, writes the answer.
 
-Status: **skeleton** (0.0.1). The query-plane Web API is complete as a contract and runs on an
-in-memory demo engine. The real index (PostgreSQL + pgvector + PGroonga, embeddings from
-OumiGo's `/v1/embeddings`), ingestion and the admin CLI are still to come.
+Status: **skeleton** (0.0.x). Knowledge bases and their sources are managed with
+`smartrag run kb|source`, and `kb sync` builds the SQLite index (text, Markdown, HTML, PDF,
+DOCX, PPTX, CSV/TSV/Excel; BM25 over character bigrams; vectors from `/v1/embeddings`). The query-plane Web API is complete as a contract and runs on an
+in-memory demo engine; it does not yet route by kb. Still to come: search over the index,
+`ingest`, `reindex`, `smartrag console` and `smartrag mcp`, and PostgreSQL. Design: `../Memo/SmartRAG_design.md` §3.6.
 
 ## Run
 
@@ -22,6 +24,54 @@ curl -s 'http://127.0.0.1:8710/v1/search?q=有給休暇の繰り越し' | python
 ```json
 [{"key_id": "ui-search", "sha256": "<sha256 of the key>", "role": "reader", "delegate": true}]
 ```
+
+## Knowledge bases
+
+```sh
+smartrag run kb new --kb legal --title 法務ナレッジベース --description "契約書と社内規程"
+smartrag run source add --kb legal --source kitei ~/Documents/規程 --include '**/*.pdf'
+smartrag run source test --kb legal --source kitei      # what a sync would see; reads no contents
+smartrag run kb status --kb legal
+smartrag run --format json kb list                      # JSON for programs, errors included
+```
+
+| Command | Purpose |
+|---|---|
+| `kb list` | The kbs in the home, each `ok`, `locked` or `config_error` |
+| `kb new --kb ID` | Create `<home>/<ID>/` with `config.yaml`, `sink/`, `cache/`, `runs/`. `--remote URL --token-env VAR` makes a remote kb |
+| `kb status --kb ID` | Settings, sources, sink, index, lock, environment variables, warnings. No network calls |
+| `kb remove --kb ID` | Delete the kb's folder (config, index, sink copies). Original files are never touched |
+| `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts. Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
+| `source list --kb ID` | Registered sources plus the reserved `sink` |
+| `source add --kb ID --source SID LOCATION` | Register a folder or file. Nothing is copied |
+| `source remove --kb ID --source SID` | Unregister a source |
+| `source test --kb ID --source SID` | Walk it as a sync would: matches, types, skips, unreadable paths |
+
+- The home is `--home` > `$SMARTRAG_HOME` > `~/.smartrag`; `--kb` is always required.
+- Secrets appear in `config.yaml` only as `${ENV_VAR}` references; a literal value is rejected.
+- Commands edit `config.yaml` in place: your comments, key order and quoting are kept.
+- Supported file types: text, Markdown, HTML, PDF, DOCX, PPTX, and tables (CSV, TSV, XLSX,
+  XLSM, XLS, XLSB), which are converted to TSV internally. `source test` lists the rest.
+
+## Extraction
+
+The ingestion pipeline is being built piece by piece; the first piece is the table converter.
+
+```sh
+python -m smartrag.extract 見積.xlsx            # each table as TSV, under its sheet and cell range
+python -m smartrag.extract 見積.csv --json      # the blocks: header, rows, source row numbers
+```
+
+CSV, TSV and Excel files become **table blocks**: Excel's own Table objects as they are,
+everything else split at blank rows, with a text-only first row taken as the header and a
+lone cell above a table as its title. Each block keeps its header apart from its rows, so
+the chunker can break between rows and repeat the header at the top of every chunk.
+CSV encodings are detected (cp932 before cp1252) and the delimiter is sniffed. Hidden sheets
+are skipped unless asked for. Best effort: side-by-side tables with no blank row between
+them become one block, and multi-row headers become a header plus data rows.
+- Destructive commands ask first, and need `--yes` when there is no terminal.
+- Exit codes: `0` success, `1` failed, `2` usage error (`kb sync` adds `3` and `130`).
+- An embedding endpoint without authentication: remove `api_key` from `config.yaml`.
 
 ## Web API (query plane)
 
@@ -51,6 +101,8 @@ src/smartrag/
   errors.py        errors with stable codes
   paging.py        opaque cursors bound to their request
   engine/          RetrievalEngine protocol; in-memory engine + demo corpus
+  kb/              knowledge bases: home, config.yaml schema, lock, sources (core library)
+  extract/         source files to text; tabular.py: CSV/TSV/Excel to TSV table blocks
   api/             FastAPI app: query routes, ops routes, auth, error shape
-  cli/             `smartrag serve` (admin commands to come)
+  cli/             `smartrag run` (kb, source) and `smartrag serve`
 ```

@@ -1,8 +1,12 @@
 """The `smartrag` CLI.
 
-Now: `serve` (the query-plane Web API) and `version`. Admin commands — `source`, `jobs`,
-`docs`, `index`, `logs`, `apikey`, `eval` — will be added here: by design, admin runs
-through the CLI on the operator host, never through the Web API.
+    smartrag                      help
+    smartrag run ...              one command, non-interactive (see `smartrag.cli.run`)
+    smartrag serve ...            the Web API
+    smartrag version
+
+`console` (interactive session) and `mcp` (MCP over stdio) are to come. Admin commands
+run through `smartrag run` on the host that owns the kbs, never through the Web API.
 """
 
 from __future__ import annotations
@@ -14,9 +18,11 @@ from pathlib import Path
 import typer
 
 from smartrag.__about__ import __version__
+from smartrag.cli.run import run_app
 
 app = typer.Typer(help="Smart RAG: a knowledge source any agent can use.",
                   no_args_is_help=True, add_completion=False)
+app.add_typer(run_app, name="run")
 
 
 def _is_loopback(host: str) -> bool:

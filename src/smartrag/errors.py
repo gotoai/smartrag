@@ -68,3 +68,35 @@ class EmbedderUnavailable(SmartRAGError):
                  details: dict[str, Any] | None = None) -> None:
         super().__init__(message, details)
         self.retry_after = retry_after
+
+
+class Conflict(SmartRAGError):
+    """The target already exists (a kb id, a source id, a source root)."""
+
+    status = 409
+    code = "conflict"
+
+
+class KbLocked(SmartRAGError):
+    """Another process holds the kb's lock: a sync, or a change to its config.
+
+    `details` carries the holder's `pid` and `command`, so the message can say what to
+    wait for rather than only that something is busy.
+    """
+
+    status = 409
+    code = "kb_locked"
+
+
+class ConfigError(SmartRAGError):
+    """A kb's `config.yaml` is missing, unreadable or invalid."""
+
+    status = 500
+    code = "config_error"
+
+
+class Unsupported(SmartRAGError):
+    """A valid request for something not built yet, such as an S3 source in v1."""
+
+    status = 501
+    code = "unsupported"

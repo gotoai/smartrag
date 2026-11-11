@@ -26,7 +26,13 @@ dependencies = [
     "pydantic-settings>=2",
     "fastapi>=0.110",    # the query-plane Web API
     "uvicorn>=0.29",
-    "typer>=0.12",       # single CLI: serve now; admin commands (source, jobs, apikey, ...) later
+    "typer>=0.12",       # the CLI: `smartrag run|serve` (console and mcp to come)
+    "ruamel.yaml>=0.18", # per-kb config.yaml, edited in place (comments kept)
+    "python-calamine>=0.8",  # Excel (xlsx, xlsm, xls, xlsb) for the TSV converter
+    "charset-normalizer>=3.4",  # CSV encodings (cp932 exports)
+    "pdfminer.six>=20240706",   # PDF text layers
+    "python-docx>=1.1",
+    "python-pptx>=1.0",
 ]
 
 [project.urls]
@@ -41,6 +47,7 @@ dev = [
     "httpx2>=2",         # FastAPI's TestClient (Starlette deprecated plain httpx for it)
     "ruff>=0.5",
     "mypy>=1.10",
+    "openpyxl>=3.1",     # writes the Excel fixtures in tests
 ]
 
 [project.scripts]

@@ -1,0 +1,445 @@
+"""`smartrag run`: one command, non-interactive, then exit.
+
+    smartrag run [--home DIR] [--format text|json] <subject> <verb> --kb ID [options]
+
+Every verb maps to one function of the core library (`smartrag.kb`); this module only
+parses options and renders the result. `--kb` is required wherever a command acts on a
+kb, with no default even when only one exists.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import threading
+from pathlib import Path
+
+import typer
+
+from smartrag.cli.output import (
+    OutputFormat,
+    RunState,
+    bullets,
+    confirm,
+    emit_error,
+    human_bytes,
+    invoke,
+    table,
+)
+from smartrag.errors import NotFound, SmartRAGError
+from smartrag.kb import Home, add_source, list_sources, remove_source, resolve_home, test_source
+from smartrag.kb.config import CONFIG_FILE, DEFAULT_PROFILE
+from smartrag.kb.models import (
+    KbCreated,
+    KbList,
+    KbRemoved,
+    KbStatus,
+    SourceAdded,
+    SourceList,
+    SourceRemoved,
+    SourceTestReport,
+    SyncReport,
+)
+from smartrag.kb.sync import sync_kb
+
+run_app = typer.Typer(help="Run one command and exit (non-interactive).",
+                      no_args_is_help=True, add_completion=False)
+kb_app = typer.Typer(help="Knowledge bases: list, create, inspect, remove.",
+                     no_args_is_help=True)
+source_app = typer.Typer(help="A kb's sources: the folders `sync` follows.",
+                         no_args_is_help=True)
+run_app.add_typer(kb_app, name="kb")
+run_app.add_typer(source_app, name="source")
+
+
+@run_app.callback()
+def run_options(
+    ctx: typer.Context,
+    home: Path = typer.Option(None, "--home", help="Folder holding all kbs "
+                                                   "[default: $SMARTRAG_HOME or ~/.smartrag]"),
+    output: OutputFormat = typer.Option(OutputFormat.text, "--format",
+                                        help="text for people, json for programs."),
+) -> None:
+    ctx.obj = RunState(home=Home(resolve_home(home)), format=output)
+
+
+def _state(ctx: typer.Context) -> RunState:
+    state = ctx.find_object(RunState)
+    assert state is not None
+    return state
+
+
+# --- kb ------------------------------------------------------------------------------
+
+
+@kb_app.command("list")
+def kb_list(ctx: typer.Context) -> None:
+    """List the kbs in the home."""
+    state = _state(ctx)
+    invoke(state, state.home.list, _render_kb_list)
+
+
+@kb_app.command("new")
+def kb_new(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="Id of the new kb: lowercase letters, digits, "
+                                             "'-', '_'. Also its folder name."),
+    title: str = typer.Option(None, "--title", help="Display name [default: the id]."),
+    description: str = typer.Option("", "--description",
+                                    help="What the kb contains; agents choose kbs by it."),
+    profile: str = typer.Option(DEFAULT_PROFILE, "--profile",
+                                help="Embedding profile id (local kb)."),
+    remote: str = typer.Option(None, "--remote",
+                               help="Make a remote kb: the https:// URL of its Smart RAG server."),
+    remote_kb: str = typer.Option(None, "--remote-kb",
+                                  help="The kb's id on the remote server [default: --kb]."),
+    token_env: str = typer.Option(None, "--token-env",
+                                  help="Environment variable holding your token for --remote."),
+) -> None:
+    """Create a kb: its folder and config.yaml."""
+    state = _state(ctx)
+    invoke(state, lambda: state.home.new(kb, title=title, description=description,
+                                         profile=profile, remote=remote, remote_kb=remote_kb,
+                                         token_env=token_env),
+           _render_kb_created)
+
+
+@kb_app.command("status")
+def kb_status(ctx: typer.Context, kb: str = typer.Option(..., "--kb", help="The kb's id.")) -> None:
+    """Show a kb's settings, sources, sink, index and warnings. Makes no network calls."""
+    state = _state(ctx)
+    invoke(state, lambda: state.home.status(kb), _render_kb_status)
+
+
+@kb_app.command("remove")
+def kb_remove(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation."),
+) -> None:
+    """Delete a kb: its config, index and the sink's copies. Original files are untouched."""
+    state = _state(ctx)
+
+    def action() -> KbRemoved:
+        kb_dir = state.home.kb_dir(kb)
+        if not (kb_dir / CONFIG_FILE).is_file():
+            raise NotFound(f"no kb {kb!r} in {state.home.root}", {"kb": kb})
+        confirm(state, yes, f"Delete kb {kb!r} at {kb_dir}, including its index and the "
+                            "files copied into its sink? Original files are not touched.")
+        return state.home.remove(kb)
+
+    invoke(state, action, _render_kb_removed)
+
+
+@kb_app.command("sync")
+def kb_sync(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    source: str = typer.Option(None, "--source",
+                               help="Sync only this source (or 'sink') [default: all]."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                 help="List, extract and chunk; embed and write nothing."),
+    force: bool = typer.Option(False, "--force",
+                               help="Re-extract files even if unchanged. Unchanged chunks "
+                                    "keep their vectors."),
+    exit_with_parent: bool = typer.Option(
+        False, "--exit-with-parent",
+        help="Stop cleanly when stdin closes: how a parent app (Kari) says it has gone."),
+) -> None:
+    """Bring the kb's index in line with its sources.
+
+    Exit codes: 0 done; 1 failed; 3 done, but some files were skipped or failed;
+    130 interrupted. Running it again resumes where an interrupted sync stopped."""
+    state = _state(ctx)
+    if exit_with_parent:
+        _stop_when_stdin_closes()
+
+    def progress(event: dict[str, object]) -> None:
+        if state.format is OutputFormat.json:
+            typer.echo(json.dumps(event, ensure_ascii=False))
+        elif event.get("event") == "document" and event.get("status") != "unchanged":
+            typer.echo(f"[{event['n']}/{event['total']}] {event['source']}/{event['path']}: "
+                       f"{event['status']}"
+                       + (f", {event['chunks']} chunks" if event.get("chunks") else ""),
+                       err=True)
+        elif event.get("event") == "source":
+            typer.echo(f"source {event['source']}: {event['files']} files", err=True)
+
+    try:
+        report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
+                         progress=progress)
+    except SmartRAGError as err:
+        emit_error(state.format, err)
+        raise typer.Exit(1) from None
+    if state.format is OutputFormat.json:
+        typer.echo(report.model_dump_json())
+    else:
+        typer.echo(_render_sync(report))
+    raise typer.Exit(_sync_exit_code(report))
+
+
+def _sync_exit_code(report: SyncReport) -> int:
+    if report.interrupted:
+        return 130
+    if report.error:
+        return 1
+    if report.counts.skipped or report.counts.failed:
+        return 3
+    return 0
+
+
+def _stop_when_stdin_closes() -> None:
+    """Interrupt the main thread when stdin reaches end-of-file, so the sync stops
+    between documents, releases its lock and writes its report."""
+    import _thread
+
+    def watch() -> None:
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        except (OSError, ValueError):
+            pass
+        _thread.interrupt_main()
+
+    threading.Thread(target=watch, name="exit-with-parent", daemon=True).start()
+
+
+# --- source --------------------------------------------------------------------------
+
+
+@source_app.command("list")
+def source_list(ctx: typer.Context,
+                kb: str = typer.Option(..., "--kb", help="The kb's id.")) -> None:
+    """List a kb's sources, including its sink."""
+    state = _state(ctx)
+    invoke(state, lambda: list_sources(state.home, kb), _render_source_list)
+
+
+@source_app.command("add")
+def source_add(
+    ctx: typer.Context,
+    location: str = typer.Argument(..., help="A folder or file: a path or a file:// URI."),
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    source: str = typer.Option(..., "--source", help="Id for the new source."),
+    include: list[str] = typer.Option(None, "--include",
+                                      help="Only files matching this glob, e.g. '**/*.pdf'. "
+                                           "Repeatable."),
+    exclude: list[str] = typer.Option(None, "--exclude",
+                                      help="Skip files matching this glob. Repeatable."),
+    recursive: bool = typer.Option(True, "--recursive/--no-recursive",
+                                   help="Include subfolders."),
+    allow_missing: bool = typer.Option(False, "--allow-missing",
+                                       help="Accept a path that does not exist now "
+                                            "(e.g. a share that is not mounted)."),
+) -> None:
+    """Register a folder (or file) that `sync` will follow. Nothing is copied."""
+    state = _state(ctx)
+    invoke(state, lambda: add_source(state.home, kb, source, location, recursive=recursive,
+                                     include=include or [], exclude=exclude or [],
+                                     allow_missing=allow_missing),
+           _render_source_added)
+
+
+@source_app.command("remove")
+def source_remove(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    source: str = typer.Option(..., "--source", help="The source's id."),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation."),
+) -> None:
+    """Unregister a source and remove its documents from the index."""
+    state = _state(ctx)
+
+    def action() -> SourceRemoved:
+        listed = list_sources(state.home, kb)
+        match = next((s for s in listed.sources if s.id == source), None)
+        if match is None:
+            raise NotFound(f"kb {kb!r} has no source {source!r}", {"kb": kb, "source": source})
+        if match.kind == "source":
+            confirm(state, yes, f"Remove source {source!r} ({match.root}) from kb {kb!r}, "
+                                "with its documents in the index? Its files are not touched.")
+        return remove_source(state.home, kb, source)
+
+    invoke(state, action, _render_source_removed)
+
+
+@source_app.command("test")
+def source_test(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    source: str = typer.Option(..., "--source", help="The source's id (or 'sink')."),
+    sample: int = typer.Option(10, "--sample", min=0, max=1000,
+                               help="How many matching paths to list."),
+) -> None:
+    """Show what a sync of this source would see. Reads no file contents; changes nothing."""
+    state = _state(ctx)
+    invoke(state, lambda: test_source(state.home, kb, source, sample=sample),
+           _render_source_test, failed=lambda report: not report.ok)
+
+
+# --- text rendering ------------------------------------------------------------------
+
+
+def _render_kb_list(result: KbList) -> str:
+    if not result.kbs:
+        where = result.home if result.home_exists else f"{result.home} (does not exist yet)"
+        return f"No kbs in {where}.\nCreate one: smartrag run kb new --kb <id>"
+    rows = []
+    for item in result.kbs:
+        status = item.status if item.error is None else f"{item.status}: {item.error}"
+        rows.append([item.kb, item.title, item.kind, item.sources, status])
+    return f"home: {result.home}\n\n" + table(["KB", "TITLE", "KIND", "SOURCES", "STATUS"], rows)
+
+
+def _render_kb_created(result: KbCreated) -> str:
+    return (f"Created {result.kind} kb {result.kb!r} at {result.path}\n"
+            f"Config: {result.config}\n\nNext:\n{bullets(result.next_steps)}")
+
+
+def _render_kb_status(result: KbStatus) -> str:
+    env = ", ".join(f"{name} ({'missing' if name in result.env.missing else 'set'})"
+                    for name in result.env.referenced) or "-"
+    if result.lock is None:
+        lock = "free"
+    elif result.lock.stale:
+        lock = f"stale (left by pid {result.lock.pid})"
+    else:
+        lock = f"held by pid {result.lock.pid} ({result.lock.command or 'unknown'})"
+    rows: list[list[object]] = [
+        ["kb", result.kb], ["title", result.title], ["kind", result.kind],
+        ["path", result.path],
+    ]
+    if result.remote is not None:
+        rows += [["endpoint", result.remote.endpoint], ["remote kb", result.remote.kb]]
+    else:
+        index = result.index
+        rows += [
+            ["profile", result.embedding_profile],
+            ["sources", result.sources],
+            ["sink", f"{result.sink_files or 0} files, {human_bytes(result.sink_bytes or 0)}"],
+            ["index", _index_line(index)],
+        ]
+    rows += [["lock", lock], ["env", env]]
+    text = "\n".join(f"{label:<11}{value}" for label, value in rows)
+    description = result.description.strip()
+    text += "\n\ndescription\n" + ("\n".join(f"  {line}" for line in description.splitlines())
+                                   if description else "  (none)")
+    if result.warnings:
+        text += "\n\nwarnings\n" + bullets(result.warnings)
+    return text
+
+
+def _index_line(index: object) -> str:
+    from smartrag.kb.models import IndexInfo
+
+    if not isinstance(index, IndexInfo) or not index.exists:
+        return "not built"
+    if index.documents is None:
+        return human_bytes(index.bytes)
+    return (f"{index.ok} documents, {index.chunks:,} chunks, {human_bytes(index.bytes)}"
+            + (f" ({index.skipped} skipped, {index.failed} failed)"
+               if index.skipped or index.failed else "")
+            + (f"; last sync {index.last_sync_at}" if index.last_sync_at else ""))
+
+
+def _render_kb_removed(result: KbRemoved) -> str:
+    parts = [f"Deleted kb {result.kb!r} ({result.path})."]
+    details = []
+    if result.index_deleted:
+        details.append("its index")
+    if result.sink_files_deleted:
+        details.append(f"{result.sink_files_deleted} files copied into its sink")
+    if details:
+        parts.append("Removed " + " and ".join(details) + ".")
+    if result.kept_sink:
+        parts.append(f"Its sink outside the kb folder was kept: {result.kept_sink}")
+    parts.append("Original files were not touched.")
+    return " ".join(parts)
+
+
+def _render_sync(r: SyncReport) -> str:
+    c = r.counts
+    head = "Dry run of" if r.dry_run else "Synced"
+    lines = [f"{head} kb {r.kb!r} in {r.took_ms / 1000:.1f} s"]
+    if r.error:
+        lines.append(f"stopped: {r.error}")
+    if r.interrupted:
+        lines.append("interrupted: run it again to resume")
+    lines.append(f"documents  {c.added} added, {c.updated} updated, {c.unchanged} unchanged, "
+                 f"{c.removed} removed, {c.skipped} skipped, {c.failed} failed")
+    if r.dry_run:
+        lines.append(f"chunks     {r.chunks_written:,} (about {r.tokens_estimated:,} tokens "
+                     f"to embed)")
+    else:
+        lines.append(f"chunks     {r.chunks_written:,} written: {r.chunks_embedded:,} embedded, "
+                     f"{r.chunks_reused:,} reused (about {r.tokens_estimated:,} tokens)")
+    t = r.timings_ms
+    lines.append("time       " + ", ".join(f"{k} {v / 1000:.1f} s" for k, v in t.items()))
+    for s in r.sources:
+        state = "" if s.complete else " (incomplete listing)"
+        note = f": {s.note}" if s.note else ""
+        lines.append(f"source     {s.source}: {s.files} files{state}"
+                     + (f", {s.removed} removed" if s.removed else "") + note)
+    if r.issues:
+        lines.append("problems")
+        lines += [f"  {i.status}: {i.source}/{i.path}: {i.reason}" for i in r.issues[:20]]
+        if r.issues_total > 20:
+            where = "listed in the report" if r.report_path else "run with --format json"
+            lines.append(f"  ... and {r.issues_total - 20} more ({where})")
+    if r.report_path:
+        lines.append(f"report     {r.report_path}")
+    return "\n".join(lines)
+
+
+def _render_source_list(result: SourceList) -> str:
+    rows = []
+    for item in result.sources:
+        root = item.root if item.root_exists else f"{item.root} (missing)"
+        rows.append([item.id, item.kind, root, "yes" if item.recursive else "no",
+                     ", ".join(item.include), ", ".join(item.exclude)])
+    return (table(["ID", "KIND", "ROOT", "RECURSIVE", "INCLUDE", "EXCLUDE"], rows)
+            + "\n\nAlways skipped: " + ", ".join(result.builtin_exclude))
+
+
+def _render_source_added(result: SourceAdded) -> str:
+    item = result.source
+    text = (f"Added source {item.id!r} to kb {result.kb!r}: {item.root}"
+            f"{' (recursive)' if item.recursive else ''}")
+    if not item.root_exists:
+        text += "\n(the path does not exist right now)"
+    if result.warnings:
+        text += "\n\nwarnings\n" + bullets(result.warnings)
+    return text + (f"\n\nNext: smartrag run source test --kb {result.kb} --source {item.id}")
+
+
+def _render_source_removed(result: SourceRemoved) -> str:
+    text = f"Removed source {result.source!r} ({result.uri}) from kb {result.kb!r}."
+    if result.documents_removed is not None:
+        text += f" {result.documents_removed} documents were removed from the index."
+    return f"{text}\n{result.note}" if result.note else text
+
+
+def _render_source_test(r: SourceTestReport) -> str:
+    shape = f"{r.root_kind}{', recursive' if r.recursive and r.root_kind == 'directory' else ''}"
+    lines = [f"source   {r.source} -> {r.root} ({shape})"]
+    if r.root_kind in ("directory", "file"):
+        lines.append(f"matched  {r.files_matched:,} files, {human_bytes(r.bytes_matched)} "
+                     f"(supported {r.supported_files:,}, unsupported {r.unsupported_files:,})")
+        if r.by_extension:
+            kinds = sorted(r.by_extension.items(), key=lambda kv: (-kv[1], kv[0]))
+            lines.append("by type  " + ", ".join(f"{ext} {count:,}" for ext, count in kinds))
+        lines.append(f"skipped  built-in {r.excluded_builtin:,}, excluded {r.excluded_by_pattern:,}"
+                     f", not included {r.not_included:,}, symlinks {r.symlinks_skipped:,}")
+    if r.errors:
+        lines.append("errors")
+        lines += [f"  {e.path}: {e.error}" for e in r.errors]
+        if r.errors_total > len(r.errors):
+            lines.append(f"  ... and {r.errors_total - len(r.errors)} more")
+    if r.sample:
+        lines.append("sample")
+        lines += [f"  {path}" for path in r.sample]
+    if r.problems:
+        lines.append("problems")
+        lines.append(bullets(r.problems))
+    lines.append(f"took {r.took_ms} ms")
+    return "\n".join(lines)
