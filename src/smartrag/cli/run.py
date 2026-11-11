@@ -12,7 +12,11 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from collections.abc import Callable
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -29,6 +33,7 @@ from smartrag.cli.output import (
 from smartrag.errors import NotFound, SmartRAGError
 from smartrag.kb import Home, add_source, list_sources, remove_source, resolve_home, test_source
 from smartrag.kb.config import CONFIG_FILE, DEFAULT_PROFILE
+from smartrag.kb.ingest import IngestReport, ingest_files
 from smartrag.kb.models import (
     KbCreated,
     KbList,
@@ -40,7 +45,15 @@ from smartrag.kb.models import (
     SourceTestReport,
     SyncReport,
 )
+from smartrag.kb.reindex import reindex_rebuild, reindex_stale
 from smartrag.kb.sync import sync_kb
+from smartrag.search import (
+    KbReadResponse,
+    KbSearchResponse,
+    SearchFilter,
+    read_chunk,
+    search_kb,
+)
 
 run_app = typer.Typer(help="Run one command and exit (non-interactive).",
                       no_args_is_help=True, add_completion=False)
@@ -153,11 +166,22 @@ def kb_sync(
     state = _state(ctx)
     if exit_with_parent:
         _stop_when_stdin_closes()
+    try:
+        report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
+                         progress=_progress_printer(state))
+    except SmartRAGError as err:
+        emit_error(state.format, err)
+        raise typer.Exit(1) from None
+    _print_report(state, report, _render_sync)
+    raise typer.Exit(_sync_exit_code(report))
 
+
+def _progress_printer(state: RunState) -> Callable[[dict[str, object]], None]:
     def progress(event: dict[str, object]) -> None:
         if state.format is OutputFormat.json:
             typer.echo(json.dumps(event, ensure_ascii=False))
-        elif event.get("event") == "document" and event.get("status") != "unchanged":
+        elif event.get("event") == "document" and event.get("status") not in ("unchanged",
+                                                                             "deferred"):
             typer.echo(f"[{event['n']}/{event['total']}] {event['source']}/{event['path']}: "
                        f"{event['status']}"
                        + (f", {event['chunks']} chunks" if event.get("chunks") else ""),
@@ -165,16 +189,85 @@ def kb_sync(
         elif event.get("event") == "source":
             typer.echo(f"source {event['source']}: {event['files']} files", err=True)
 
+    return progress
+
+
+def _print_report(state: RunState, report: SyncReport | IngestReport,
+                  render: Callable[[Any], str]) -> None:
+    if state.format is OutputFormat.json:
+        typer.echo(report.model_dump_json())  # one line: the last line of the output
+    else:
+        typer.echo(render(report))
+
+
+@kb_app.command("ingest")
+def kb_ingest(
+    ctx: typer.Context,
+    paths: list[str] = typer.Argument(..., help="Files, or folders with --recursive."),
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    recursive: bool = typer.Option(False, "--recursive", "-r",
+                                   help="Ingest the files inside the folders named."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                 help="Report what would be copied and embedded; copy nothing."),
+    exit_with_parent: bool = typer.Option(False, "--exit-with-parent",
+                                          help="Stop cleanly when stdin closes."),
+) -> None:
+    """Copy files into the kb's sink and index them. The copies are snapshots: later
+    changes to the originals are not picked up (use `source add` to follow a folder).
+
+    Exit codes: as `kb sync`; 3 also when a file was skipped (unsupported, unreadable)."""
+    state = _state(ctx)
+    if exit_with_parent:
+        _stop_when_stdin_closes()
     try:
-        report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
-                         progress=progress)
+        report = ingest_files(state.home, kb, paths, recursive=recursive, dry_run=dry_run,
+                              progress=_progress_printer(state))
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
-    if state.format is OutputFormat.json:
-        typer.echo(report.model_dump_json())
-    else:
-        typer.echo(_render_sync(report))
+    _print_report(state, report, _render_ingest)
+    code = _sync_exit_code(report.sync) if report.sync is not None else 0
+    raise typer.Exit(code if code else (3 if report.skipped else 0))
+
+
+@kb_app.command("reindex")
+def kb_reindex(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    refresh_stale_only: bool = typer.Option(
+        False, "--refresh-stale-only",
+        help="Re-process only the documents built by an older pipeline version; new, changed "
+             "and deleted files are left for the next sync."),
+    rebuild: bool = typer.Option(False, "--rebuild",
+                                 help="Build a fresh index beside the live one, then swap it in. "
+                                      "Also how a kb changes its embedding model."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report the work; change nothing."),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation (--rebuild)."),
+    exit_with_parent: bool = typer.Option(False, "--exit-with-parent",
+                                          help="Stop cleanly when stdin closes."),
+) -> None:
+    """Re-process stale documents, or rebuild the index. Give exactly one of --refresh-stale-only and
+    --rebuild. Exit codes as `kb sync`."""
+    state = _state(ctx)
+    if refresh_stale_only == rebuild:
+        raise typer.BadParameter("give exactly one of --refresh-stale-only and --rebuild",
+                                 param_hint="--refresh-stale-only / --rebuild")
+    if exit_with_parent:
+        _stop_when_stdin_closes()
+    progress = _progress_printer(state)
+    try:
+        if refresh_stale_only:
+            report = reindex_stale(state.home, kb, dry_run=dry_run, progress=progress)
+        else:
+            if not dry_run:
+                confirm(state, yes, f"Rebuild the index of kb {kb!r}? Every file is read and "
+                                    "processed again; vectors are reused where the embedding "
+                                    "profile is unchanged. Search keeps working meanwhile.")
+            report = reindex_rebuild(state.home, kb, dry_run=dry_run, progress=progress)
+    except SmartRAGError as err:
+        emit_error(state.format, err)
+        raise typer.Exit(1) from None
+    _print_report(state, report, _render_sync)
     raise typer.Exit(_sync_exit_code(report))
 
 
@@ -202,6 +295,100 @@ def _stop_when_stdin_closes() -> None:
         _thread.interrupt_main()
 
     threading.Thread(target=watch, name="exit-with-parent", daemon=True).start()
+
+
+class SearchModeOption(str, Enum):
+    hybrid = "hybrid"
+    lexical = "lexical"
+    vector = "vector"
+
+
+class GroupByOption(str, Enum):
+    chunk = "chunk"
+    document = "document"
+
+
+class IncludeOption(str, Enum):
+    highlights = "highlights"
+    text = "text"
+
+
+class ScopeOption(str, Enum):
+    chunk = "chunk"
+    neighbors = "neighbors"
+    section = "section"
+    document = "document"
+
+
+_DATE_FORMATS = ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]
+
+
+@kb_app.command("search")
+def kb_search(
+    ctx: typer.Context,
+    query: str = typer.Argument(..., help="Natural language; a part in double quotes is an "
+                                          "exact phrase on the keyword side."),
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    limit: int = typer.Option(10, "-k", "--limit", min=1, max=50, help="Results per page."),
+    page: int = typer.Option(None, "--page", min=1, help="Page number (for people)."),
+    cursor: str = typer.Option(None, "--cursor",
+                               help="The next_cursor of a previous JSON result (for programs)."),
+    mode: SearchModeOption = typer.Option(SearchModeOption.hybrid, "--mode",
+                                          help="hybrid, lexical (keyword only) or vector."),
+    group_by: GroupByOption = typer.Option(GroupByOption.chunk, "--group-by",
+                                           help="chunk: passages; document: one per file."),
+    max_per_doc: int = typer.Option(3, "--max-per-doc", min=1, max=50,
+                                    help="At most this many chunks from one document."),
+    source: list[str] = typer.Option(None, "--source", help="Only this source. Repeatable."),
+    file_type: list[str] = typer.Option(None, "--type",
+                                        help="Only this file type, e.g. pdf. Repeatable."),
+    path: str = typer.Option(None, "--path", help="Only files under this folder of the source."),
+    modified_after: datetime = typer.Option(None, "--modified-after", formats=_DATE_FORMATS,
+                                            help="Files modified on or after this date."),
+    modified_before: datetime = typer.Option(None, "--modified-before", formats=_DATE_FORMATS,
+                                             help="Files modified before this date."),
+    include: list[IncludeOption] = typer.Option(None, "--include",
+                                                help="Extra fields: highlights, text. "
+                                                     "Repeatable."),
+    snippet_chars: int = typer.Option(300, "--snippet-chars", min=50, max=2000,
+                                      help="Snippet length."),
+) -> None:
+    """Search the kb for evidence: ranked chunks with snippets and citations. An empty
+    result list is a success (exit 0)."""
+    state = _state(ctx)
+    if page is not None and cursor:
+        raise typer.BadParameter("give --page or --cursor, not both", param_hint="--page")
+    filters = SearchFilter(source=source or [], file_type=file_type or [], path_prefix=path,
+                           modified_after=modified_after, modified_before=modified_before)
+    invoke(state, lambda: search_kb(
+        state.home, kb, query, limit=limit, page=page, cursor=cursor, mode=mode.value,
+        group_by=group_by.value, max_per_doc=max_per_doc, filters=filters,
+        include=[i.value for i in include or []], snippet_chars=snippet_chars),
+        _render_search)
+
+
+@kb_app.command("read")
+def kb_read(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    chunk: str = typer.Option(..., "--chunk", help="A chunk_id from a search result."),
+    scope: ScopeOption = typer.Option(ScopeOption.chunk, "--scope",
+                                      help="chunk, neighbors, section or document."),
+    window: int = typer.Option(1, "--window", min=0, max=20,
+                               help="For --scope neighbors: chunks on each side."),
+    max_chars: int = typer.Option(4000, "--max-chars", min=200, max=100_000,
+                                  help="Characters per page; pages break between chunks."),
+    page: int = typer.Option(None, "--page", min=1, help="Page number (for people)."),
+    cursor: str = typer.Option(None, "--cursor",
+                               help="The next_cursor of a previous JSON result (for programs)."),
+) -> None:
+    """Read a chunk, widened to its neighbours, its section or its whole document."""
+    state = _state(ctx)
+    if page is not None and cursor:
+        raise typer.BadParameter("give --page or --cursor, not both", param_hint="--page")
+    invoke(state, lambda: read_chunk(state.home, kb, chunk, scope=scope.value, window=window,
+                                     max_chars=max_chars, page=page, cursor=cursor),
+           _render_read)
 
 
 # --- source --------------------------------------------------------------------------
@@ -357,16 +544,21 @@ def _render_kb_removed(result: KbRemoved) -> str:
     return " ".join(parts)
 
 
+_OPERATION_TITLES = {"sync": "Synced", "reindex-stale": "Re-processed stale documents of",
+                     "reindex-rebuild": "Rebuilt the index of", "ingest": "Synced the sink of"}
+
+
 def _render_sync(r: SyncReport) -> str:
     c = r.counts
-    head = "Dry run of" if r.dry_run else "Synced"
+    head = "Dry run:" if r.dry_run else _OPERATION_TITLES.get(r.operation, "Synced")
     lines = [f"{head} kb {r.kb!r} in {r.took_ms / 1000:.1f} s"]
     if r.error:
         lines.append(f"stopped: {r.error}")
     if r.interrupted:
         lines.append("interrupted: run it again to resume")
     lines.append(f"documents  {c.added} added, {c.updated} updated, {c.unchanged} unchanged, "
-                 f"{c.removed} removed, {c.skipped} skipped, {c.failed} failed")
+                 f"{c.removed} removed, {c.skipped} skipped, {c.failed} failed"
+                 + (f", {c.deferred} left for the next sync" if c.deferred else ""))
     if r.dry_run:
         lines.append(f"chunks     {r.chunks_written:,} (about {r.tokens_estimated:,} tokens "
                      f"to embed)")
@@ -388,6 +580,84 @@ def _render_sync(r: SyncReport) -> str:
             lines.append(f"  ... and {r.issues_total - 20} more ({where})")
     if r.report_path:
         lines.append(f"report     {r.report_path}")
+    return "\n".join(lines)
+
+
+def _pages(page: int | None, page_end: int | None) -> str:
+    if page is None:
+        return ""
+    return f"p.{page}" if page_end in (None, page) else f"p.{page}–{page_end}"
+
+
+def _render_search(r: KbSearchResponse) -> str:
+    lines: list[str] = []
+    if r.degraded:
+        lines.append(f"note: {r.degraded}")
+    if not r.results:
+        lines.append(f"No results for {r.query!r} ({r.mode}, {r.took_ms} ms).")
+        return "\n".join(lines)
+    for hit in r.results:
+        c = hit.citation
+        where = "  ".join(part for part in (
+            _pages(c.page, c.page_end), c.location or "", " > ".join(c.heading_path)) if part)
+        sides = " · ".join(f"{side} {rank}" for side, rank in
+                           (("lexical", hit.ranks.lexical), ("vector", hit.ranks.vector))
+                           if rank is not None)
+        lines.append(f"{hit.rank}. {hit.title}  {where}".rstrip() + f"    [{sides}]")
+        lines.append(f"   {hit.snippet}")
+        where_from = f"sink, from {c.origin_path}" if c.origin_path else f"{c.source_id}/{c.path}"
+        lines.append(f"   {where_from} · chunk {hit.chunk_id}")
+        if hit.text:
+            lines.append("   " + hit.text.replace("\n", "\n   "))
+    more = f" · more: --page {r.page + 1}" if r.next_cursor else ""
+    lines.append(f"page {r.page} · {len(r.results)} results · {r.mode} · {r.took_ms} ms{more}")
+    return "\n".join(lines)
+
+
+def _render_read(r: KbReadResponse) -> str:
+    c = r.citation
+    head = f"{r.title}  {c.source_id}/{c.path}  ({r.scope}, {r.total_chunks} chunks)"
+    lines = [head]
+    path: list[str] = []
+    for chunk in r.chunks:
+        if chunk.heading_path != path:
+            path = chunk.heading_path
+            if path:
+                lines.append(f"── {' > '.join(path)}")
+        marker = "  ".join(part for part in (_pages(chunk.page, chunk.page_end),
+                                              chunk.location or "") if part)
+        lines.append(f"[{chunk.ordinal}] {marker}".rstrip() + (" ◀" if chunk.chunk_id
+                                                                == r.chunk_id else ""))
+        if chunk.prefix:
+            lines.append(chunk.prefix)
+        lines.append(chunk.text)
+    if r.truncated:
+        lines.append("(a chunk longer than --max-chars was cut)")
+    more = f" · more: --page {r.page + 1}" if r.next_cursor else ""
+    lines.append(f"page {r.page}{more}")
+    return "\n".join(lines)
+
+
+def _render_ingest(r: IngestReport) -> str:
+    verb = {"copied": "copied", "would_copy": "would copy", "already": "already in the sink",
+            "skipped": "skipped"}
+    lines = [f"{'Dry run: ' if r.dry_run else ''}ingest into kb {r.kb!r}"]
+    for item in r.files[:50]:
+        reason = f" ({item.reason})" if item.reason and item.status == "skipped" else ""
+        lines.append(f"  {verb[item.status]}: {item.path}{reason}")
+    if len(r.files) > 50:
+        lines.append(f"  ... and {len(r.files) - 50} more")
+    to_copy = len(r.files) - r.already - r.skipped if r.dry_run else r.copied
+    lines.append(f"files      {to_copy} {'to copy' if r.dry_run else 'copied'} "
+                 f"({human_bytes(r.bytes_copied)}), {r.already} already in the sink, "
+                 f"{r.skipped} skipped")
+    if r.dry_run:
+        lines.append(f"chunks     about {r.chunks_estimated:,} "
+                     f"(about {r.tokens_estimated:,} tokens to embed)")
+    if r.sync is not None:
+        lines.append(_render_sync(r.sync))
+    if r.copied or r.dry_run:
+        lines.append(r.note)
     return "\n".join(lines)
 
 

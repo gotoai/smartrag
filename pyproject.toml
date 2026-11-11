@@ -33,6 +33,7 @@ dependencies = [
     "pdfminer.six>=20240706",   # PDF text layers
     "python-docx>=1.1",
     "python-pptx>=1.0",
+    "numpy>=1.26",       # vector search (brute force over a memory-mapped matrix)
 ]
 
 [project.urls]
@@ -67,6 +68,7 @@ src = ["src", "tests"]
 # FastAPI / typer declare parameters through calls in defaults; that is their idiom.
 extend-immutable-calls = [
     "fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "typer.Option",
+    "typer.Argument",
 ]
 
 [tool.pytest.ini_options]

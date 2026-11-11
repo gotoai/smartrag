@@ -157,6 +157,8 @@ class SyncCounts(BaseModel):
     removed: int = 0
     skipped: int = 0
     failed: int = 0
+    deferred: int = 0
+    """`reindex --refresh-stale-only` only: new or changed files left for the next sync."""
 
 
 class SyncIssue(BaseModel):
@@ -180,6 +182,7 @@ class SyncReport(BaseModel):
     unchanged since is `unchanged`, not `skipped` again."""
 
     kb: str
+    operation: Literal["sync", "reindex-stale", "reindex-rebuild", "ingest"] = "sync"
     dry_run: bool
     started_at: str
     finished_at: str | None = None

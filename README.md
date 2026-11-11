@@ -6,8 +6,9 @@ citations); the agent, or a person at the search box, writes the answer.
 Status: **skeleton** (0.0.x). Knowledge bases and their sources are managed with
 `smartrag run kb|source`, and `kb sync` builds the SQLite index (text, Markdown, HTML, PDF,
 DOCX, PPTX, CSV/TSV/Excel; BM25 over character bigrams; vectors from `/v1/embeddings`). The query-plane Web API is complete as a contract and runs on an
-in-memory demo engine; it does not yet route by kb. Still to come: search over the index,
-`ingest`, `reindex`, `smartrag console` and `smartrag mcp`, and PostgreSQL. Design: `../Memo/SmartRAG_design.md` §3.6.
+in-memory demo engine; it does not yet route by kb. `kb search` and `kb read` query the index.
+Still to come: the kb-aware Web API, `smartrag console` and `smartrag mcp`, `doc list|show|remove`,
+and PostgreSQL. Design: `../Memo/SmartRAG_design.md` §3.6.
 
 ## Run
 
@@ -42,6 +43,10 @@ smartrag run --format json kb list                      # JSON for programs, err
 | `kb status --kb ID` | Settings, sources, sink, index, lock, environment variables, warnings. No network calls |
 | `kb remove --kb ID` | Delete the kb's folder (config, index, sink copies). Original files are never touched |
 | `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts. Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
+| `kb ingest --kb ID PATH...` | Copy files (folders with `-r`) into the kb's sink and index them; copies are snapshots, the same content twice is a no-op |
+| `kb reindex --kb ID --refresh-stale-only\|--rebuild` | Re-process stale documents, or rebuild the index beside the live one and swap it in (also how a kb changes model) |
+| `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--mode`, `--group-by`, filters, `--page`/`--cursor`). Evidence only, never an answer |
+| `kb read --kb ID --chunk CHUNK_ID` | A search result widened to `--scope neighbors|section|document`, paged by `--max-chars` |
 | `source list --kb ID` | Registered sources plus the reserved `sink` |
 | `source add --kb ID --source SID LOCATION` | Register a folder or file. Nothing is copied |
 | `source remove --kb ID --source SID` | Unregister a source |
@@ -103,6 +108,9 @@ src/smartrag/
   engine/          RetrievalEngine protocol; in-memory engine + demo corpus
   kb/              knowledge bases: home, config.yaml schema, lock, sources (core library)
   extract/         source files to text; tabular.py: CSV/TSV/Excel to TSV table blocks
+  chunking.py      units to chunks; index/: SQLite store and bigram lexify
+  embedding.py     the /v1/embeddings client; kb/sync.py: the sync
+  search/          kb search (hybrid, RRF, paging) and kb read
   api/             FastAPI app: query routes, ops routes, auth, error shape
   cli/             `smartrag run` (kb, source) and `smartrag serve`
 ```

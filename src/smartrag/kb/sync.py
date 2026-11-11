@@ -45,6 +45,7 @@ from smartrag.kb.home import INDEX_FILE, Home
 from smartrag.kb.lock import kb_lock
 from smartrag.kb.models import SourceSync, SyncIssue, SyncReport
 from smartrag.kb.sources import (
+    SINK_SIDECAR,
     SUPPORTED_EXTENSIONS,
     ListedFile,
     SyncTarget,
@@ -82,7 +83,8 @@ def doc_id_for(source: str, rel_path: str) -> str:
 class _Run:
     def __init__(self, home: Home, config: KbConfig, store: SqliteIndex | None,
                  embedder: Embedder | None, report: SyncReport, force: bool,
-                 progress: Progress | None) -> None:
+                 progress: Progress | None, *, only_stale: bool = False,
+                 donor: SqliteIndex | None = None) -> None:
         self.home = home
         self.config = config
         self.store = store
@@ -90,6 +92,9 @@ class _Run:
         self.report = report
         self.force = force
         self.progress = progress
+        self.only_stale = only_stale
+        self.donor = donor
+        """Another index whose vectors may be reused (a rebuild's old index)."""
         self.version = report.pipeline_version
         self.profile = report.profile
         self.timings = {"list": 0, "extract": 0, "embed": 0, "write": 0}
@@ -127,6 +132,8 @@ class _Run:
             self._emit(event="document", source=target.source, path=listed.rel,
                        status=status, chunks=chunks, n=number, total=len(listing.files))
 
+        if self.only_stale:
+            return  # removals are the next sync's job
         gone = [row.doc_id for (_s, rel), row in existing.items() if rel not in seen]
         if gone and not listing.complete:
             info.note = (info.note or "the listing was incomplete") + \
@@ -141,6 +148,12 @@ class _Run:
     def _file(self, target: SyncTarget, listed: ListedFile,
               old: DocumentRow | None) -> tuple[str, int]:
         counts = self.report.counts
+        if self.only_stale and (old is None or old.pipeline_version == self.version):
+            if old is not None and (old.size, old.mtime_ns) == (listed.size, listed.mtime_ns):
+                counts.unchanged += 1
+                return "unchanged", old.chunk_count
+            counts.deferred += 1
+            return "deferred", 0
         current = (old is not None and old.pipeline_version == self.version
                    and not self.force)
         if current and old is not None and (old.size, old.mtime_ns) == (listed.size,
@@ -157,7 +170,10 @@ class _Run:
         except OSError as exc:
             reason = f"cannot read: {exc.strerror or exc}"
             return self._record(target, listed, old, None, "failed", reason), 0
-        content_hash = _sha256(data)
+        # The extracted text depends on the bytes *and* on the pipeline that read them, so
+        # both make up the key it is stored under: identical files share it, and a new
+        # extractor version never inherits the text an older one produced.
+        content_hash = f"{_sha256(data)}:{self.version}"
         if current and old is not None and old.content_hash == content_hash:
             if self.store is not None and not self.report.dry_run:
                 self.store.touch_document(old.doc_id, listed.size, listed.mtime_ns)
@@ -211,14 +227,16 @@ class _Run:
             file_type=listed.path.suffix.lower().lstrip(".") or "",
             size=listed.size, mtime_ns=listed.mtime_ns, content_hash=content_hash,
             pipeline_version=self.version, status=status, reason=reason, title=title,
-            pages=pages, chunk_count=0, indexed_at=_now())
+            pages=pages, chunk_count=0, indexed_at=_now(),
+            origin_path=_origin_of(listed.path) if target.source == SINK_ID else None)
 
     def _index(self, target: SyncTarget, listed: ListedFile, old: DocumentRow | None,
                content_hash: str, extracted: Extracted) -> tuple[str, int]:
         assert self.config.chunk is not None
         text, chunks = chunk_units(extracted.units, self.config.chunk)
         doc_id = doc_id_for(target.source, listed.rel)
-        rows = self._chunk_rows(doc_id, listed.rel, chunks)
+        origin = _origin_of(listed.path) if target.source == SINK_ID else None
+        rows = self._chunk_rows(doc_id, origin or listed.rel, chunks)
         self.report.tokens_estimated += sum(chunk.tokens for chunk in chunks)
         status = "updated" if old is not None else "added"
         if old is not None:
@@ -231,6 +249,9 @@ class _Run:
 
         started = time.monotonic()
         known = self.store.vectors_for((r.text_hash for r in rows), self.profile)
+        if self.donor is not None:
+            missing = [r.text_hash for r in rows if r.text_hash not in known]
+            known.update(self.donor.vectors_for(missing, self.profile))
         needed = [r for r in rows if r.text_hash not in known]
         for row in rows:
             if row.text_hash in known:
@@ -252,10 +273,13 @@ class _Run:
         self.timings["write"] += int((time.monotonic() - started) * 1000)
         return status, len(rows)
 
-    def _chunk_rows(self, doc_id: str, rel: str, chunks: list[Chunk]) -> list[ChunkRow]:
+    def _chunk_rows(self, doc_id: str, searchable_path: str,
+                    chunks: list[Chunk]) -> list[ChunkRow]:
+        """`searchable_path` is the relative path, or for an ingested copy the place it was
+        copied from: folder names carry the user's own taxonomy."""
         rows: list[ChunkRow] = []
         occurrences: dict[str, int] = {}
-        path_text = lexify(_PATH_SEPARATORS.sub(" ", rel))
+        path_text = lexify(_PATH_SEPARATORS.sub(" ", searchable_path))
         for chunk in chunks:
             embed_text = chunk.embed_text()
             text_hash = _sha256(f"{self.profile}\0{embed_text}")[:32]
@@ -288,50 +312,78 @@ class _Run:
 
 
 def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool = False,
-            force: bool = False, embedder: Embedder | None = None,
-            progress: Progress | None = None) -> SyncReport:
+            force: bool = False, only_stale: bool = False, embedder: Embedder | None = None,
+            progress: Progress | None = None, operation: str | None = None) -> SyncReport:
+    """Sync a kb. `only_stale` (for `kb reindex --refresh-stale-only`) re-processes only documents built
+    by an older pipeline version: no new files, no removals. `operation` labels the run's
+    report when another command runs the sync (`kb ingest`)."""
+    config, targets, report = _prepare(home, kb_id, source, dry_run,
+                                       operation or ("reindex-stale" if only_stale else "sync"))
+    kb_dir = home.kb_dir(kb_id)
+    index_path = kb_dir / INDEX_FILE
+    started = time.monotonic()
+    if dry_run:
+        store = SqliteIndex.open(index_path, readonly=True) if index_path.is_file() else None
+        try:
+            _execute(_Run(home, config, store, None, report, force, progress,
+                          only_stale=only_stale), targets, source)
+        finally:
+            if store is not None:
+                store.close()
+        return _finish(report, started, None)
+    with kb_lock(kb_dir, "kb reindex --refresh-stale-only" if only_stale else "kb sync"):
+        sync_into(home, config, index_path, report, targets, source, force=force,
+                  only_stale=only_stale, embedder=embedder, progress=progress)
+        return _finish(report, started, kb_dir / "runs")
+
+
+def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool,
+             operation: str) -> tuple[KbConfig, list[SyncTarget], SyncReport]:
     config = home.load(kb_id)
     if config.kind == "remote":
         raise InvalidRequest(f"kb {kb_id!r} is remote: its sources are managed by its server",
                              {"kb": kb_id})
     assert config.embedding is not None
-    targets = sync_targets(home, config, source)
-    report = SyncReport(kb=kb_id, dry_run=dry_run, started_at=_now(),
-                        profile=config.embedding.profile, pipeline_version=pipeline_version(config))
-    kb_dir = home.kb_dir(kb_id)
-    index_path = kb_dir / INDEX_FILE
-    started = time.monotonic()
+    report = SyncReport(kb=kb_id, operation=operation, dry_run=dry_run,  # type: ignore[arg-type]
+                        started_at=_now(), profile=config.embedding.profile,
+                        pipeline_version=pipeline_version(config))
+    return config, sync_targets(home, config, source), report
 
-    if dry_run:
-        store = SqliteIndex.open(index_path, readonly=True) if index_path.is_file() else None
-        try:
-            _execute(home, config, store, None, report, targets, source, force, progress)
-        finally:
-            if store is not None:
-                store.close()
-        return _finish(report, started, None)
 
-    with kb_lock(kb_dir, "kb sync"):
-        if embedder is None:
-            embedder = HttpEmbedder(config.embedding)
-        dimensions = embedder.check()
-        (kb_dir / "sink").mkdir(mode=0o700, exist_ok=True)
-        store = SqliteIndex.open(index_path)
-        try:
-            _check_profile(store, report.profile, dimensions)
-            _execute(home, config, store, embedder, report, targets, source, force, progress)
-            dims = dimensions or getattr(embedder, "dimensions", None)
-            if dims and store.meta("dimensions") is None:
-                store.set_meta("dimensions", str(dims))
-            store.set_meta("last_sync_at", _now())
-            store.db.commit()
-            store.collect_garbage()
-            counts = report.counts
-            if counts.added + counts.updated + counts.removed:
-                store.optimize()
-        finally:
-            store.close()
-        return _finish(report, started, kb_dir / "runs")
+def sync_into(home: Home, config: KbConfig, index_path: Path, report: SyncReport,
+              targets: list[SyncTarget], source: str | None, *, force: bool = False,
+              only_stale: bool = False, embedder: Embedder | None = None,
+              progress: Progress | None = None, donor: SqliteIndex | None = None,
+              first_generation: int | None = None) -> None:
+    """The sync itself, into `index_path`, by a caller already holding the kb lock.
+    `donor` lends vectors (a rebuild's old index); `first_generation` starts a new
+    index's generation counter after the one it replaces."""
+    assert config.embedding is not None
+    if embedder is None:
+        embedder = HttpEmbedder(config.embedding)
+    dimensions = embedder.check()
+    home.sink_dir(config).mkdir(mode=0o700, parents=True, exist_ok=True)
+    store = SqliteIndex.open(index_path)
+    try:
+        if first_generation is not None and store.generation() < first_generation:
+            with store.db:
+                store.set_meta("generation", str(first_generation))
+        _check_profile(store, report.profile, dimensions)
+        _execute(_Run(home, config, store, embedder, report, force, progress,
+                      only_stale=only_stale, donor=donor), targets, source)
+        dims = dimensions or getattr(embedder, "dimensions", None)
+        if dims and store.meta("dimensions") is None:
+            store.set_meta("dimensions", str(dims))
+        store.set_meta("last_sync_at", _now())
+        store.db.commit()
+        store.collect_garbage()
+        counts = report.counts
+        if counts.added + counts.updated + counts.removed:
+            store.optimize()
+        if counts.added + counts.updated + counts.removed + counts.skipped + counts.failed:
+            store.bump_generation()
+    finally:
+        store.close()
 
 
 def _check_profile(store: SqliteIndex, profile: str, dimensions: int | None) -> None:
@@ -340,7 +392,7 @@ def _check_profile(store: SqliteIndex, profile: str, dimensions: int | None) -> 
         raise ConfigError(
             f"the index holds vectors from {held!r} but the config says {profile!r}; "
             "vectors from different models cannot be mixed. Restore the profile, or rebuild "
-            "the index (`kb reindex --rebuild`, to come).",
+            "the index with `smartrag run kb reindex --kb <id> --rebuild`.",
             {"index_profile": held, "config_profile": profile})
     held_dims = store.meta("dimensions")
     if held_dims and dimensions and int(held_dims) != dimensions:
@@ -351,15 +403,13 @@ def _check_profile(store: SqliteIndex, profile: str, dimensions: int | None) -> 
         store.db.commit()
 
 
-def _execute(home: Home, config: KbConfig, store: SqliteIndex | None,
-             embedder: Embedder | None, report: SyncReport, targets: list[SyncTarget],
-             source: str | None, force: bool, progress: Progress | None) -> None:
-    run = _Run(home, config, store, embedder, report, force, progress)
+def _execute(run: _Run, targets: list[SyncTarget], source: str | None) -> None:
+    report = run.report
     try:
         for target in targets:
             run.sync_target(target)
-        if source is None:
-            run.sweep_removed_sources({s.id for s in config.sources} | {SINK_ID})
+        if source is None and not run.only_stale:
+            run.sweep_removed_sources({s.id for s in run.config.sources} | {SINK_ID})
     except EmbedderUnavailable as exc:
         report.error = exc.message
     except KeyboardInterrupt:
@@ -368,13 +418,23 @@ def _execute(home: Home, config: KbConfig, store: SqliteIndex | None,
         report.timings_ms = run.timings
 
 
+def _origin_of(path: Path) -> str | None:
+    """Where an ingested copy came from, as recorded beside it by `kb ingest`."""
+    try:
+        data = json.loads((path.parent / SINK_SIDECAR).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    origin = data.get("origin_path") if isinstance(data, dict) else None
+    return origin if isinstance(origin, str) else None
+
+
 def _finish(report: SyncReport, started: float, runs_dir: Path | None) -> SyncReport:
     report.finished_at = _now()
     report.took_ms = int((time.monotonic() - started) * 1000)
     if runs_dir is not None:
         runs_dir.mkdir(mode=0o700, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = runs_dir / f"{stamp}-sync.json"
+        path = runs_dir / f"{stamp}-{report.operation}.json"
         report.report_path = str(path)
         path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     return report

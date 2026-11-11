@@ -180,3 +180,30 @@ def test_cli_dry_run_json_lines_and_exit_codes(home, docs, monkeypatch):
     assert any(e.get("event") == "document" for e in lines)
     assert lines[-1]["counts"]["added"] == 2
     assert result.exit_code == 3  # image.png was skipped
+
+
+def test_a_new_pipeline_version_never_reads_stale_text(home, tmp_path, monkeypatch):
+    """Regression: extracted text was keyed by the file's bytes alone, so re-extracting
+    an unchanged file with a newer extractor kept the old text under the new chunks."""
+    import smartrag.kb.sync as sync_module
+    from smartrag.extract.units import Extracted, Unit
+    from smartrag.search import read_chunk
+
+    root = tmp_path / "one"
+    root.mkdir()
+    (root / "a.txt").write_text("placeholder", encoding="utf-8")
+    add_source(home, "legal", "one", str(root))
+    monkeypatch.setattr(sync_module, "extract",
+                        lambda path: Extracted(units=[Unit("old wording of the text")]))
+    sync_kb(home, "legal", embedder=FakeEmbedder())
+
+    monkeypatch.setattr(sync_module, "extract",
+                        lambda path: Extracted(units=[Unit("brand new wording, longer than before")]))
+    monkeypatch.setattr(sync_module, "pipeline_version", lambda config: "v-next")
+    report = sync_kb(home, "legal", embedder=FakeEmbedder())
+    assert report.counts.updated == 1
+
+    db = sqlite3.connect(home.root / "legal" / "index.db")
+    chunk_id = db.execute("SELECT chunk_id FROM chunks").fetchone()[0]
+    read = read_chunk(home, "legal", chunk_id)
+    assert read.chunks[0].text == "brand new wording, longer than before"

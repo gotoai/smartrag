@@ -100,3 +100,11 @@ class Unsupported(SmartRAGError):
 
     status = 501
     code = "unsupported"
+
+
+class CursorExpired(SmartRAGError):
+    """The index changed (a sync wrote to it) since this cursor was issued. Pages from
+    two different indexes could repeat or skip results, so start again from page 1."""
+
+    status = 410
+    code = "cursor_expired"

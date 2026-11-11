@@ -204,3 +204,57 @@ def test_small_tail_merges_into_the_previous_chunk():
     _text, chunks = chunk_units(units, ChunkConfig(target_tokens=50, max_tokens=100,
                                                    min_tokens=20))
     assert len(chunks) == 1 and chunks[0].text.endswith("い" * 10)
+
+
+def test_pdf_joins_wrapped_lines_but_not_items_or_sentences():
+    from smartrag.extract.pdf import _join_wrapped_lines
+
+    units = [Unit("first part of a sentence that the", page=1), Unit("printer wrapped.", page=1),
+             Unit("(1) an item", page=1), Unit("next line", page=2),
+             Unit("Heading", "heading", level=2, page=2), Unit("after heading", page=2)]
+    texts = [u.text for u in _join_wrapped_lines(units)]
+    assert texts == ["first part of a sentence that the printer wrapped.", "(1) an item",
+                     "next line", "Heading", "after heading"]
+    japanese = _join_wrapped_lines([Unit("電子申告に当た", page=1), Unit("ってはシステム面で", page=1),
+                                    Unit("（２）次の項目", page=1)])
+    assert [u.text for u in japanese] == ["電子申告に当たってはシステム面で", "（２）次の項目"]
+
+
+def test_pdf_reading_order_does_not_depend_on_memory_addresses():
+    """Regression: pdfminer breaks distance ties by id(), a memory address. Four boxes on a
+    square tie, and with the addresses reversed it groups them by columns instead of
+    rows: a different reading order of the same page in another process."""
+    import builtins
+
+    from pdfminer import layout
+    from pdfminer.layout import LAParams, LTLayoutContainer, LTTextBoxHorizontal, LTTextGroup
+
+    from smartrag.extract.pdf import _deterministic_tie_breaks
+
+    def group(fake_id):
+        boxes = []
+        for x, y in [(0, 0), (100, 0), (0, 100), (100, 100)]:
+            box = LTTextBoxHorizontal()
+            box.set_bbox((x, y, x + 10, y + 10))
+            boxes.append(box)
+        index = {builtins.id(b): i for i, b in enumerate(boxes)}
+
+        def shape(obj):
+            if isinstance(obj, LTTextGroup):
+                return tuple(shape(o) for o in obj)
+            return index[builtins.id(obj)]
+
+        layout.id = fake_id  # simulates another process's memory addresses
+        try:
+            groups = LTLayoutContainer((0, 0, 200, 200)).group_textboxes(LAParams(), boxes)
+            restored = not hasattr(layout, "id")
+        finally:
+            if hasattr(layout, "id"):
+                del layout.id
+        return [shape(g) for g in groups], restored
+
+    _deterministic_tie_breaks()
+    ascending, restored = group(lambda obj: builtins.id(obj))
+    descending, _ = group(lambda obj: -builtins.id(obj))
+    assert ascending == descending
+    assert restored, "the replacement is removed after each call"

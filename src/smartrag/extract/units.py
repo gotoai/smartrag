@@ -7,7 +7,7 @@ canonical text is the units joined by newlines.
 
 `extract(path)` dispatches on the file's extension. `EXTRACTOR_VERSION` goes into the
 pipeline version: bump it whenever an extractor's output changes, and `kb reindex
---stale` will re-extract what an older extractor produced.
+--refresh-stale-only` will re-extract what an older extractor produced.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Literal
 
 from smartrag.errors import Unsupported
 
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "3"  # 2: PDF lines joined; 3: deterministic PDF reading order
 
 UnitKind = Literal["heading", "text", "header", "row"]
 

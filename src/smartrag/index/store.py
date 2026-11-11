@@ -6,7 +6,7 @@ One file, WAL mode, one writer (the sync, under the kb lock), any number of read
 |---|---|
 | `meta` | schema version, the embedding profile and dimensions every vector came from |
 | `documents` | one row per file seen: ok, skipped or failed, with the reason; skipped and failed files are not retried until they change |
-| `contents` | each distinct extracted text once, by content hash (identical files share it) |
+| `contents` | each distinct extracted text once, keyed by the file's hash and the pipeline version that read it (identical files share it; a new extractor gets its own) |
 | `chunks` | spans of a document's text, their heading path and location, and their vector |
 | `chunk_fts` | FTS5, contentless, over bigram-split text: BM25 for the keyword side |
 
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS documents (
     pages            INTEGER,
     chunk_count      INTEGER NOT NULL DEFAULT 0,
     indexed_at       TEXT NOT NULL,
+    origin_path      TEXT,
     UNIQUE (source_id, rel_path)
 );
 CREATE TABLE IF NOT EXISTS contents (
@@ -100,6 +101,8 @@ class DocumentRow:
     pages: int | None
     chunk_count: int
     indexed_at: str
+    origin_path: str | None = None
+    """For a file ingested into the sink: where it was copied from."""
 
 
 @dataclass
@@ -134,6 +137,19 @@ class IndexStats(BaseModel):
     last_indexed_at: str | None
 
 
+#: Columns added after an index may already exist: added in place on the next write.
+_ADDED_COLUMNS = {"documents": [("origin_path", "TEXT")]}
+
+
+def _add_missing_columns(connection: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        present = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for name, kind in columns:
+            if name not in present:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+    connection.commit()
+
+
 def pack_vector(vector: Sequence[float]) -> bytes:
     return array("f", vector).tobytes()
 
@@ -152,7 +168,12 @@ class SqliteIndex:
     @classmethod
     def open(cls, path: Path, *, readonly: bool = False) -> SqliteIndex:
         if readonly:
-            connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=30)
+            # Not `mode=ro`: a read-only connection to a WAL database cannot start when the
+            # `-shm` file is absent, which is the normal state after the last writer closed.
+            # `mode=rw` opens without ever creating a missing database, and `query_only`
+            # refuses every write, so this connection still cannot change the index.
+            connection = sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True, timeout=30)
+            connection.execute("PRAGMA query_only = ON")
         else:
             connection = sqlite3.connect(path, timeout=30)
         connection.row_factory = sqlite3.Row
@@ -160,6 +181,7 @@ class SqliteIndex:
         if not readonly:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(_SCHEMA)
+            _add_missing_columns(connection)
             path.chmod(0o600)  # the index holds the full extracted text of the documents
             index = cls(connection, path)
             version = index.meta("schema_version")
@@ -175,6 +197,13 @@ class SqliteIndex:
     def close(self) -> None:
         self.db.close()
 
+    def has_column(self, table: str, column: str) -> bool:
+        return any(row[1] == column for row in self.db.execute(f"PRAGMA table_info({table})"))
+
+    def checkpoint(self) -> None:
+        """Fold the write-ahead log into the database file, leaving the log empty."""
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     # --- meta ----------------------------------------------------------------------
 
     def meta(self, key: str) -> str | None:
@@ -184,6 +213,16 @@ class SqliteIndex:
     def set_meta(self, key: str, value: str) -> None:
         self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) "
                         "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def generation(self) -> int:
+        """A counter every write to the index increments: search and read cursors are
+        bound to it, so a page is never taken from a different index than page 1."""
+        value = self.meta("generation")
+        return int(value) if value else 0
+
+    def bump_generation(self) -> None:
+        with self.db:
+            self.set_meta("generation", str(self.generation() + 1))
 
     # --- documents -----------------------------------------------------------------
 
@@ -232,16 +271,18 @@ class SqliteIndex:
             self.db.execute(
                 "INSERT INTO documents (doc_id, source_id, rel_path, uri, file_type, size, "
                 "mtime_ns, content_hash, pipeline_version, status, reason, title, pages, "
-                "chunk_count, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "chunk_count, indexed_at, origin_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (doc_id) DO UPDATE SET uri = excluded.uri, "
                 "file_type = excluded.file_type, size = excluded.size, "
                 "mtime_ns = excluded.mtime_ns, content_hash = excluded.content_hash, "
                 "pipeline_version = excluded.pipeline_version, status = excluded.status, "
                 "reason = excluded.reason, title = excluded.title, pages = excluded.pages, "
-                "chunk_count = excluded.chunk_count, indexed_at = excluded.indexed_at",
+                "chunk_count = excluded.chunk_count, indexed_at = excluded.indexed_at, "
+                "origin_path = excluded.origin_path",
                 (doc.doc_id, doc.source_id, doc.rel_path, doc.uri, doc.file_type, doc.size,
                  doc.mtime_ns, doc.content_hash, doc.pipeline_version, doc.status, doc.reason,
-                 doc.title, doc.pages, len(chunks), doc.indexed_at))
+                 doc.title, doc.pages, len(chunks), doc.indexed_at, doc.origin_path))
             for chunk in chunks:
                 cursor = self.db.execute(
                     "INSERT INTO chunks (chunk_id, doc_id, ordinal, start, end, prefix, "

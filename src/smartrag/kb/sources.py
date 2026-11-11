@@ -65,6 +65,10 @@ SUPPORTED_EXTENSIONS = frozenset({
 
 _MAX_ERRORS_LISTED = 20
 
+#: Written by `kb ingest` beside each copy in the sink: where the copy came from. Never a
+#: document itself.
+SINK_SIDECAR = ".origin.json"
+
 
 def compile_glob(pattern: str) -> re.Pattern[str]:
     if not pattern or pattern.startswith("/"):
@@ -212,7 +216,8 @@ def sync_targets(home: Home, config: KbConfig, source_id: str | None) -> list[Sy
         targets.append(SyncTarget(source.id, source.uri, root, source.recursive,
                                   list(source.include), list(source.exclude)))
     sink = home.sink_dir(config)
-    targets.append(SyncTarget(SINK_ID, path_to_uri(sink), sink, True, [], []))
+    targets.append(SyncTarget(SINK_ID, path_to_uri(sink), sink, True, [],
+                              [f"**/{SINK_SIDECAR}"]))
     if source_id is None:
         return targets
     chosen = [t for t in targets if t.source == source_id]
@@ -355,6 +360,8 @@ def remove_source(home: Home, kb_id: str, source_id: str) -> SourceRemoved:
             try:
                 removed = store.delete_source(source_id)
                 store.collect_garbage()
+                if removed:
+                    store.bump_generation()
             finally:
                 store.close()
         document.remove_source(source_id)
@@ -372,7 +379,8 @@ def test_source(home: Home, kb_id: str, source_id: str, *, sample: int = 10) -> 
     root: Path | None
     if source_id == SINK_ID:
         sink = home.sink_dir(config)
-        root, uri, recursive, include, exclude = sink, path_to_uri(sink), True, [], []
+        root, uri, recursive = sink, path_to_uri(sink), True
+        include, exclude = [], [f"**/{SINK_SIDECAR}"]
     else:
         source = _find(config, source_id)
         root = uri_to_path(source.uri)
