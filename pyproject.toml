@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]  # PEP 639 `license` expression + `license-files`
 build-backend = "hatchling.build"
 
 [project]
@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "GOTOAI" }]
 keywords = ["rag", "retrieval", "search", "agents", "mcp", "embeddings"]
-# TODO: choose the licence (open framework vs commercial implementation) and add
-# `license = "..."` + `license-files = ["LICENSE"]`.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
@@ -26,7 +26,8 @@ dependencies = [
     "pydantic-settings>=2",
     "fastapi>=0.110",    # the query-plane Web API
     "uvicorn>=0.29",
-    "typer>=0.12",       # the CLI: `smartrag run|serve` (console and mcp to come)
+    "typer>=0.12",       # the CLI: `smartrag run|serve|mcp` (console to come)
+    "mcp>=2.3,<3",      # `smartrag mcp` (MCPServer is the 2.x API); required so it can always start
     "ruamel.yaml>=0.18", # per-kb config.yaml, edited in place (comments kept)
     "python-calamine>=0.8",  # Excel (xlsx, xlsm, xls, xlsb) for the TSV converter
     "charset-normalizer>=3.4",  # CSV encodings (cp932 exports)

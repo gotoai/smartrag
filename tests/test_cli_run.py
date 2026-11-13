@@ -43,6 +43,19 @@ def test_kb_lifecycle(run, tmp_path):
     assert _json(run("kb", "list"))["kbs"] == []
 
 
+def test_kb_set_description(run):
+    run("kb", "new", "--kb", "courtskb")
+    updated = _json(run("kb", "set", "--kb=courtskb", "--description=裁判例のナレッジベース"))
+    assert updated == {"kb": "courtskb", "changed": ["description"],
+                       "description": "裁判例のナレッジベース", "notes": updated["notes"]}
+    assert _json(run("kb", "status", "--kb", "courtskb"))["description"] == "裁判例のナレッジベース"
+    text = run("kb", "set", "--kb", "courtskb", "--description", "裁判例のナレッジベース", fmt="text")
+    assert text.exit_code == 0 and "nothing changed" in text.stdout
+    too_long = run("kb", "set", "--kb", "courtskb", "--description", "判" * 301)
+    assert too_long.exit_code == 1 and _json(too_long)["error"]["code"] == "invalid_request"
+    assert run("kb", "set", "--kb", "courtskb").exit_code == 2
+
+
 def test_kb_is_always_required(run):
     for args in (["kb", "status"], ["kb", "new"], ["source", "list"]):
         result = run(*args)

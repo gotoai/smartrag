@@ -10,7 +10,7 @@ import pytest
 
 from smartrag.errors import ConfigError, Conflict, InvalidRequest, KbLocked, NotFound
 from smartrag.kb import Home, resolve_home
-from smartrag.kb.config import CONFIG_FILE, KbConfig, load_config
+from smartrag.kb.config import CONFIG_FILE, ConfigDocument, KbConfig, load_config
 from smartrag.kb.lock import LOCK_FILE, kb_lock, read_lock
 from smartrag.kb.uris import location_to_uri, path_to_uri, uri_to_path
 
@@ -157,6 +157,69 @@ def test_status_warns_about_what_needs_doing(home, monkeypatch, tmp_path):
         assert expected in joined
     with pytest.raises(NotFound):
         home.status("nope")
+
+
+# --- kb set ------------------------------------------------------------------------
+
+
+def test_set_description_in_place(home):
+    home.new("legal")
+    path = home.kb_dir("legal") / CONFIG_FILE
+    path.write_text(path.read_text(encoding="utf-8") + "# my note\n", encoding="utf-8")
+    updated = home.set("legal", description="  裁判例のナレッジベース\n")
+    assert updated.changed == ["description"] and updated.description == "裁判例のナレッジベース"
+    assert home.load("legal").description == "裁判例のナレッジベース"
+    text = path.read_text(encoding="utf-8")
+    assert "# my note" in text and "Agents choose a kb by this text." in text
+    assert home.set("legal", description="裁判例のナレッジベース").changed == []
+    assert not any("description" in w for w in home.status("legal").warnings)
+
+
+def test_set_description_keeps_line_breaks_and_can_clear(home):
+    home.new("legal", description="old")
+    home.set("legal", description="第一行\n第二行")
+    assert home.load("legal").description == "第一行\n第二行"
+    cleared = home.set("legal", description="")
+    assert cleared.changed == ["description"] and "do not see this kb" in cleared.notes[0]
+    assert "no description" in " ".join(home.status("legal").warnings)
+
+
+def test_set_description_inserts_a_missing_key_after_the_title(home):
+    home.new("legal", description="x")
+    path = home.kb_dir("legal") / CONFIG_FILE
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines()
+             if not line.startswith("description:")]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    home.set("legal", description="裁判例")
+    keys = [line.split(":")[0] for line in path.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith((" ", "#", "-"))]
+    assert keys[keys.index("title") + 1] == "description"
+
+
+def test_description_limit_is_enforced_on_writing_only(home):
+    with pytest.raises(InvalidRequest, match="301 characters"):
+        home.new("legal", description="判" * 301)
+    home.new("legal", description="判" * 300)
+    with pytest.raises(InvalidRequest, match="limit is 300"):
+        home.set("legal", description="判" * 301)
+    home.set("legal", description="判 \n " * 150)  # counted as agents see it: 299
+    by_hand = ConfigDocument.load(home.kb_dir("legal") / CONFIG_FILE)  # no limit on load
+    by_hand.set_description("判" * 400)
+    by_hand.save()
+    assert home.load("legal").description == "判" * 400
+    assert "agents see only the first 300" in " ".join(home.status("legal").warnings)
+
+
+def test_set_needs_a_value_a_kb_and_the_lock(home):
+    with pytest.raises(InvalidRequest, match="nothing to set"):
+        home.set("legal")
+    with pytest.raises(NotFound):
+        home.set("legal", description="x")
+    home.new("legal")
+    with kb_lock(home.kb_dir("legal"), "kb sync"), pytest.raises(KbLocked):
+        home.set("legal", description="x")
+    home.new("factory", remote="https://rag.example.jp", token_env="FACTORY_TOKEN")
+    assert home.set("factory", description="工場の資料").changed == ["description"]
 
 
 # --- kb remove ---------------------------------------------------------------------

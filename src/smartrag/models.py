@@ -4,7 +4,7 @@ These models are both the Web API's wire format and what a `RetrievalEngine` ret
 so the contract is defined once. Request models forbid unknown fields: a typo such as
 `filter` for `filters` must fail loudly, not silently search without the filter.
 
-Ids are stable (CommonRAG P3):
+Ids are stable (design memo §1.2, P3):
 
 * `doc_id` — never changes for one file in one source.
 * `chunk_id` — `<doc_id>:v<version>:c<ordinal>`; tied to one version of the document,

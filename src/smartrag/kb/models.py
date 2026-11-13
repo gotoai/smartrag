@@ -78,6 +78,13 @@ class KbStatus(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class KbUpdated(BaseModel):
+    kb: str
+    changed: list[str] = Field(description="The settings that changed; empty if none did.")
+    description: str
+    notes: list[str] = Field(default_factory=list)
+
+
 class KbRemoved(BaseModel):
     kb: str
     path: str

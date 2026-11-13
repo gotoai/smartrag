@@ -177,6 +177,9 @@ def test_cli_dry_run_json_lines_and_exit_codes(home, docs, monkeypatch):
                                       "kb", "sync", "--kb", "legal", "--dry-run"])
     lines = [json.loads(line) for line in result.stdout.splitlines()]
     assert lines[0]["event"] == "source"
+    # every source (the sink included) is listed before the plan gives the total
+    sources = [e for e in lines if e.get("event") == "source"]
+    assert lines[len(sources)] == {"event": "plan", "files": sum(e["files"] for e in sources)}
     assert any(e.get("event") == "document" for e in lines)
     assert lines[-1]["counts"]["added"] == 2
     assert result.exit_code == 3  # image.png was skipped

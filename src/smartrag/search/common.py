@@ -86,8 +86,13 @@ def decode_cursor(cursor: str, binding: str, generation: int) -> int:
 # --- filters -----------------------------------------------------------------------
 
 
+_INT64 = 2**63 - 1
+
+
 def _ns(moment: datetime) -> int:
-    return int(moment.astimezone().timestamp() * 1_000_000_000)
+    """Nanoseconds, clamped to SQLite's integer range: past the year 2262 they would not
+    fit, and a far-off date such as 9999-12-31 still means "no limit on this side"."""
+    return max(-_INT64, min(_INT64, int(moment.astimezone().timestamp() * 1_000_000_000)))
 
 
 def filter_sql(filters: SearchFilter) -> tuple[str, list[object]]:

@@ -40,6 +40,9 @@ SINK_ID = "sink"
 DEFAULT_PROFILE = "ruri-v3-310m@8k"
 DEFAULT_EMBED_URL_ENV = "SMARTRAG_EMBED_BASE_URL"
 DEFAULT_EMBED_KEY_ENV = "SMARTRAG_EMBED_API_KEY"
+MAX_DESCRIPTION = 300
+"""Characters of a kb's description, counted as agents see it (one paragraph). Agents
+choose a kb by it, and the MCP server puts it in every session's instructions."""
 
 #: Lowercase only: a kb id is a directory name, and macOS and Windows file systems
 #: ignore case, so `Legal` and `legal` would be two ids for one directory.
@@ -59,6 +62,22 @@ def check_id(value: str, what: str) -> str:
             f"invalid {what} {value!r}: use 1-64 lowercase letters, digits, '-' or '_', "
             "starting with a letter or digit")
     return value
+
+
+def description_length(text: str) -> int:
+    """Its length as agents see it: whitespace runs, line breaks included, count as one."""
+    return len(" ".join(text.split()))
+
+
+def check_description(text: str) -> str:
+    """The description, stripped. Enforced where it is written (`kb new`, `kb set`), not on
+    load: a longer hand-edited one still loads, and `kb status` warns."""
+    text = text.strip()
+    length = description_length(text)
+    if length > MAX_DESCRIPTION:
+        raise ValueError(f"the description is {length} characters; the limit is "
+                         f"{MAX_DESCRIPTION}, since agents read it in every session")
+    return text
 
 
 def _secret_ref(value: str | None) -> str | None:
@@ -385,6 +404,16 @@ class ConfigDocument:
         elif not sources:
             sources.fa.set_block_style()  # `sources: []` would otherwise stay inline
         sources.append(_source_map(source))
+        self._revalidate()
+
+    def set_description(self, text: str) -> None:
+        value = LiteralScalarString(text) if "\n" in text else text
+        if "description" in self.data:
+            self.data["description"] = value
+        else:
+            keys = list(self.data)
+            at = keys.index("title") + 1 if "title" in keys else len(keys)
+            self.data.insert(at, "description", value)
         self._revalidate()
 
     def remove_source(self, source_id: str) -> None:

@@ -9,7 +9,7 @@ The file is re-read when it changes, so a key issued or revoked by the CLI takes
 without restarting the server.
 
 `X-SmartRAG-On-Behalf-Of: <user id>` names the end user an agent or UI acts for
-(CommonRAG P2). Only keys with `delegate: true` may send it; v1 logs it and passes it to
+(design memo §1.2, P2). Only keys with `delegate: true` may send it; v1 logs it and passes it to
 the engine, and document permissions will use it later.
 """
 

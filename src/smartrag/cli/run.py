@@ -13,6 +13,7 @@ import json
 import sys
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -30,6 +31,7 @@ from smartrag.cli.output import (
     invoke,
     table,
 )
+from smartrag.cli.progress import ProgressBar, progress_lines
 from smartrag.errors import NotFound, SmartRAGError
 from smartrag.kb import Home, add_source, list_sources, remove_source, resolve_home, test_source
 from smartrag.kb.config import CONFIG_FILE, DEFAULT_PROFILE
@@ -39,6 +41,7 @@ from smartrag.kb.models import (
     KbList,
     KbRemoved,
     KbStatus,
+    KbUpdated,
     SourceAdded,
     SourceList,
     SourceRemoved,
@@ -117,6 +120,22 @@ def kb_new(
            _render_kb_created)
 
 
+@kb_app.command("set")
+def kb_set(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    description: str = typer.Option(None, "--description",
+                                    help="What the kb contains, and what it does not; at most "
+                                         "300 characters. Agents choose a kb by it, and do not "
+                                         "see a kb without one."),
+) -> None:
+    """Change a kb's description in config.yaml, keeping your comments and formatting."""
+    state = _state(ctx)
+    if description is None:
+        raise typer.BadParameter("nothing to set: give --description", param_hint="--description")
+    invoke(state, lambda: state.home.set(kb, description=description), _render_kb_updated)
+
+
 @kb_app.command("status")
 def kb_status(ctx: typer.Context, kb: str = typer.Option(..., "--kb", help="The kb's id.")) -> None:
     """Show a kb's settings, sources, sink, index and warnings. Makes no network calls."""
@@ -158,6 +177,8 @@ def kb_sync(
     exit_with_parent: bool = typer.Option(
         False, "--exit-with-parent",
         help="Stop cleanly when stdin closes: how a parent app (Kari) says it has gone."),
+    refresh: float = typer.Option(1.0, "--refresh", min=0.1, metavar="SECONDS",
+                                  help="How often the progress bar is redrawn."),
 ) -> None:
     """Bring the kb's index in line with its sources.
 
@@ -167,8 +188,9 @@ def kb_sync(
     if exit_with_parent:
         _stop_when_stdin_closes()
     try:
-        report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
-                         progress=_progress_printer(state))
+        with _progress(state, refresh) as progress:
+            report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
+                             progress=progress)
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -176,20 +198,14 @@ def kb_sync(
     raise typer.Exit(_sync_exit_code(report))
 
 
-def _progress_printer(state: RunState) -> Callable[[dict[str, object]], None]:
-    def progress(event: dict[str, object]) -> None:
-        if state.format is OutputFormat.json:
-            typer.echo(json.dumps(event, ensure_ascii=False))
-        elif event.get("event") == "document" and event.get("status") not in ("unchanged",
-                                                                             "deferred"):
-            typer.echo(f"[{event['n']}/{event['total']}] {event['source']}/{event['path']}: "
-                       f"{event['status']}"
-                       + (f", {event['chunks']} chunks" if event.get("chunks") else ""),
-                       err=True)
-        elif event.get("event") == "source":
-            typer.echo(f"source {event['source']}: {event['files']} files", err=True)
-
-    return progress
+def _progress(state: RunState,
+              refresh: float = 1.0) -> AbstractContextManager[Callable[[dict[str, object]], None]]:
+    """JSON lines for programs; a progress bar on a terminal; else a line per document."""
+    if state.format is OutputFormat.json:
+        return nullcontext(lambda event: typer.echo(json.dumps(event, ensure_ascii=False)))
+    if sys.stderr.isatty():
+        return ProgressBar(refresh)
+    return nullcontext(progress_lines)
 
 
 def _print_report(state: RunState, report: SyncReport | IngestReport,
@@ -220,8 +236,9 @@ def kb_ingest(
     if exit_with_parent:
         _stop_when_stdin_closes()
     try:
-        report = ingest_files(state.home, kb, paths, recursive=recursive, dry_run=dry_run,
-                              progress=_progress_printer(state))
+        with _progress(state) as progress:
+            report = ingest_files(state.home, kb, paths, recursive=recursive, dry_run=dry_run,
+                                  progress=progress)
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -254,16 +271,16 @@ def kb_reindex(
                                  param_hint="--refresh-stale-only / --rebuild")
     if exit_with_parent:
         _stop_when_stdin_closes()
-    progress = _progress_printer(state)
     try:
-        if refresh_stale_only:
-            report = reindex_stale(state.home, kb, dry_run=dry_run, progress=progress)
-        else:
-            if not dry_run:
-                confirm(state, yes, f"Rebuild the index of kb {kb!r}? Every file is read and "
-                                    "processed again; vectors are reused where the embedding "
-                                    "profile is unchanged. Search keeps working meanwhile.")
-            report = reindex_rebuild(state.home, kb, dry_run=dry_run, progress=progress)
+        if not refresh_stale_only and not dry_run:
+            confirm(state, yes, f"Rebuild the index of kb {kb!r}? Every file is read and "
+                                "processed again; vectors are reused where the embedding "
+                                "profile is unchanged. Search keeps working meanwhile.")
+        with _progress(state) as progress:
+            if refresh_stale_only:
+                report = reindex_stale(state.home, kb, dry_run=dry_run, progress=progress)
+            else:
+                report = reindex_rebuild(state.home, kb, dry_run=dry_run, progress=progress)
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -481,6 +498,14 @@ def _render_kb_list(result: KbList) -> str:
 def _render_kb_created(result: KbCreated) -> str:
     return (f"Created {result.kind} kb {result.kb!r} at {result.path}\n"
             f"Config: {result.config}\n\nNext:\n{bullets(result.next_steps)}")
+
+
+def _render_kb_updated(result: KbUpdated) -> str:
+    head = (f"Updated kb {result.kb!r}: {', '.join(result.changed)}" if result.changed
+            else f"kb {result.kb!r} already has this description; nothing changed")
+    text = head + "\n\ndescription\n" + ("\n".join(
+        f"  {line}" for line in result.description.splitlines()) or "  (none)")
+    return text + ("\n\n" + "\n".join(result.notes) if result.notes else "")
 
 
 def _render_kb_status(result: KbStatus) -> str:

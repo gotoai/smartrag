@@ -6,9 +6,10 @@ citations); the agent, or a person at the search box, writes the answer.
 Status: **skeleton** (0.0.x). Knowledge bases and their sources are managed with
 `smartrag run kb|source`, and `kb sync` builds the SQLite index (text, Markdown, HTML, PDF,
 DOCX, PPTX, CSV/TSV/Excel; BM25 over character bigrams; vectors from `/v1/embeddings`). The query-plane Web API is complete as a contract and runs on an
-in-memory demo engine; it does not yet route by kb. `kb search` and `kb read` query the index.
-Still to come: the kb-aware Web API, `smartrag console` and `smartrag mcp`, `doc list|show|remove`,
-and PostgreSQL. Design: `../Memo/SmartRAG_design.md` §3.6.
+in-memory demo engine; it does not yet route by kb. `kb search` and `kb read` query the index,
+and `smartrag mcp` serves them to agents. Still to come: the kb-aware Web API,
+`smartrag console`, `doc list|show|remove`, and PostgreSQL. Design:
+`../Memo/design_SmartRAG.md` §3.6 (CLI) and §3.9 (MCP).
 
 ## Run
 
@@ -30,6 +31,7 @@ curl -s 'http://127.0.0.1:8710/v1/search?q=有給休暇の繰り越し' | python
 
 ```sh
 smartrag run kb new --kb legal --title 法務ナレッジベース --description "契約書と社内規程"
+smartrag run kb set --kb legal --description "契約書と社内規程。判例は含まない。"
 smartrag run source add --kb legal --source kitei ~/Documents/規程 --include '**/*.pdf'
 smartrag run source test --kb legal --source kitei      # what a sync would see; reads no contents
 smartrag run kb status --kb legal
@@ -40,9 +42,10 @@ smartrag run --format json kb list                      # JSON for programs, err
 |---|---|
 | `kb list` | The kbs in the home, each `ok`, `locked` or `config_error` |
 | `kb new --kb ID` | Create `<home>/<ID>/` with `config.yaml`, `sink/`, `cache/`, `runs/`. `--remote URL --token-env VAR` makes a remote kb |
+| `kb set --kb ID --description TEXT` | Change the description in place (comments kept). At most 300 characters; agents choose a kb by it and do not see a kb without one |
 | `kb status --kb ID` | Settings, sources, sink, index, lock, environment variables, warnings. No network calls |
 | `kb remove --kb ID` | Delete the kb's folder (config, index, sink copies). Original files are never touched |
-| `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts. Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
+| `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts. On a terminal, a progress bar redrawn every `--refresh` seconds (default 1). Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
 | `kb ingest --kb ID PATH...` | Copy files (folders with `-r`) into the kb's sink and index them; copies are snapshots, the same content twice is a no-op |
 | `kb reindex --kb ID --refresh-stale-only\|--rebuild` | Re-process stale documents, or rebuild the index beside the live one and swap it in (also how a kb changes model) |
 | `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--mode`, `--group-by`, filters, `--page`/`--cursor`). Evidence only, never an answer |
@@ -98,6 +101,31 @@ Admin operations (sources, sync, jobs, index, query logs, API keys, eval) are **
 the Web API by design: they run through the `smartrag` CLI on the operator host, and the
 query server holds no source credentials.
 
+## MCP server (agents)
+
+```sh
+smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by the MCP host
+```
+
+| Tool | Purpose |
+|---|---|
+| `list_kbs()` | The usable kbs: `kb_id` and description only |
+| `describe_sources(kb_id)` | Sources, file types, date range, last sync; the filter values `search` accepts |
+| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before)` | Hybrid search: passages with snippets and citations, never an answer |
+| `read(kb_id, chunk_id, scope, cursor)` | A passage widened to `neighbors`, its `section` or the `document`, in pages |
+
+- **Read-only.** Agents never sync, ingest or change a kb.
+- **Agents see only usable kbs:** local, indexed with at least one document, built with the
+  configured embedding profile, and with a description. The set is fixed at startup (it is
+  in the server instructions and the `kb_id` enum) and re-checked on every call; any other
+  kb id is refused as `not_found`. `--allow-kb` narrows it further.
+- **No paths reach an agent**, in results or in errors: citations carry the source id, the
+  title (a file name, never a path), page, cell range and headings.
+- **Embedding endpoint down:** keyword results with `degraded` set. A query waits at most
+  10 s with one retry; after a failure the vector side is skipped for 60 s.
+- Always starts, even with no home or no usable kb. stdout carries only the protocol; logs
+  go to stderr at warning level, without query text.
+
 ## Layout
 
 ```
@@ -111,6 +139,8 @@ src/smartrag/
   chunking.py      units to chunks; index/: SQLite store and bigram lexify
   embedding.py     the /v1/embeddings client; kb/sync.py: the sync
   search/          kb search (hybrid, RRF, paging) and kb read
+  agent/           the agent's view: usable kbs, results without paths, fast-failing embedders
+  mcp/             MCP server over agent/ (`smartrag mcp`)
   api/             FastAPI app: query routes, ops routes, auth, error shape
-  cli/             `smartrag run` (kb, source) and `smartrag serve`
+  cli/             `smartrag run` (kb, source), `smartrag serve` and `smartrag mcp`
 ```

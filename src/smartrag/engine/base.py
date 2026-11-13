@@ -5,7 +5,7 @@ PGroonga, query embeddings from OumiGo's `/v1/embeddings`) and the in-memory dem
 both implement it, so the API never changes when the engine does.
 
 Every call receives a `RequestContext`: who is calling (the API key) and, optionally, on
-whose behalf (the end user, CommonRAG P2). v1 engines only log `on_behalf_of`; document
+whose behalf (the end user, design memo §1.2, P2). v1 engines only log `on_behalf_of`; document
 permissions will use it later without an interface change.
 """
 

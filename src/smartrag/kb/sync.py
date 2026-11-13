@@ -48,6 +48,7 @@ from smartrag.kb.sources import (
     SINK_SIDECAR,
     SUPPORTED_EXTENSIONS,
     ListedFile,
+    Listing,
     SyncTarget,
     list_files,
     sync_targets,
@@ -113,16 +114,19 @@ class _Run:
 
     # --- one source ----------------------------------------------------------------
 
-    def sync_target(self, target: SyncTarget) -> None:
+    def list_target(self, target: SyncTarget) -> Listing:
         started = time.monotonic()
         listing = list_files(target, {self.home.root.resolve()})
         self.timings["list"] += int((time.monotonic() - started) * 1000)
+        self._emit(event="source", source=target.source, files=len(listing.files),
+                   complete=listing.complete)
+        return listing
+
+    def sync_target(self, target: SyncTarget, listing: Listing) -> None:
         info = SourceSync(source=target.source, root=str(target.root), files=len(listing.files),
                           complete=listing.complete, note=listing.problem)
         self.report.sources.append(info)
         existing = self.store.documents(target.source) if self.store else {}
-        self._emit(event="source", source=target.source, files=len(listing.files),
-                   complete=listing.complete)
 
         seen: set[str] = set()
         for number, listed in enumerate(listing.files, 1):
@@ -406,8 +410,11 @@ def _check_profile(store: SqliteIndex, profile: str, dimensions: int | None) -> 
 def _execute(run: _Run, targets: list[SyncTarget], source: str | None) -> None:
     report = run.report
     try:
-        for target in targets:
-            run.sync_target(target)
+        # Every source is listed before any is processed, so `plan` can give the total.
+        listings = [(target, run.list_target(target)) for target in targets]
+        run._emit(event="plan", files=sum(len(listing.files) for _t, listing in listings))
+        for target, listing in listings:
+            run.sync_target(target, listing)
         if source is None and not run.only_stale:
             run.sweep_removed_sources({s.id for s in run.config.sources} | {SINK_ID})
     except EmbedderUnavailable as exc:

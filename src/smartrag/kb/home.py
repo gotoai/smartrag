@@ -30,13 +30,16 @@ from smartrag.kb.config import (
     DEFAULT_PROFILE,
     ENV_REF,
     ID_PATTERN,
+    MAX_DESCRIPTION,
     SINK_ID,
     ConfigDocument,
     EmbeddingConfig,
     KbConfig,
     RemoteConfig,
+    check_description,
     check_id,
     describe_validation_error,
+    description_length,
 )
 from smartrag.kb.lock import kb_lock, read_lock
 from smartrag.kb.models import (
@@ -47,6 +50,7 @@ from smartrag.kb.models import (
     KbRemoved,
     KbStatus,
     KbSummary,
+    KbUpdated,
     RemoteInfo,
 )
 from smartrag.kb.uris import uri_to_path
@@ -140,6 +144,7 @@ class Home:
         kb_dir = self.kb_dir(kb_id)
         if kb_dir.exists():
             raise Conflict(f"kb {kb_id!r} already exists in {self.root}", {"kb": kb_id})
+        description = _checked_description(description)
         config = self._new_config(kb_id, title, description, profile, remote, remote_kb,
                                   token_env)
 
@@ -196,8 +201,11 @@ class Home:
         missing = config.missing_env()
         warnings: list[str] = []
         if not config.description.strip():
-            warnings.append("no description: agents choose a kb by its description, so "
-                            "write one in config.yaml")
+            warnings.append("no description: agents do not see this kb until it has one; "
+                            f"set it with `smartrag run kb set --kb {kb_id} --description`")
+        elif description_length(config.description) > MAX_DESCRIPTION:
+            warnings.append(f"the description is {description_length(config.description)} "
+                            f"characters; agents see only the first {MAX_DESCRIPTION}")
         if missing:
             warnings.append(f"environment variables not set: {', '.join(missing)}")
         holder = read_lock(kb_dir)
@@ -238,6 +246,30 @@ class Home:
                 warnings.append(f"source {source.id!r}: {root} does not exist (not mounted?)")
         return status
 
+    # --- kb set --------------------------------------------------------------------
+
+    def set(self, kb_id: str, *, description: str | None = None) -> KbUpdated:
+        """Change the settings people write: v1 the description (`--title` later).
+        Edits config.yaml in place, under the kb lock."""
+        if description is None:
+            raise InvalidRequest("nothing to set: give --description")
+        text = _checked_description(description)
+        self.document(kb_id)  # NotFound before taking a lock in a folder that is not a kb
+        changed: list[str] = []
+        with kb_lock(self.kb_dir(kb_id), "kb set"):
+            document = self.document(kb_id)
+            if document.model.description != text:
+                document.set_description(text)
+                document.save()
+                changed.append("description")
+        notes = []
+        if not text:
+            notes.append("With no description, agents do not see this kb.")
+        elif changed:
+            notes.append("A running `smartrag mcp` lists the new text at once, and puts it in "
+                         "its instructions when it restarts.")
+        return KbUpdated(kb=kb_id, changed=changed, description=text, notes=notes)
+
     # --- kb remove -----------------------------------------------------------------
 
     def remove(self, kb_id: str) -> KbRemoved:
@@ -270,6 +302,13 @@ class Home:
                          kept_sink=str(sink) if sink is not None and not inside else None)
 
 
+def _checked_description(text: str) -> str:
+    try:
+        return check_description(text)
+    except ValueError as exc:
+        raise InvalidRequest(str(exc), {"limit": MAX_DESCRIPTION}) from exc
+
+
 def _next_steps(config: KbConfig) -> list[str]:
     missing = config.missing_env()
     steps: list[str] = []
@@ -279,7 +318,8 @@ def _next_steps(config: KbConfig) -> list[str]:
         steps.append(f"Add a folder: smartrag run source add --kb {config.id} "
                      f"--source <id> <folder>")
     if not config.description.strip():
-        steps.append("Write a description in config.yaml: agents choose a kb by it.")
+        steps.append(f"Describe it: smartrag run kb set --kb {config.id} --description "
+                     "\"...\" (agents choose a kb by it, and do not see one without it)")
     steps.append(f"Check it: smartrag run kb status --kb {config.id}")
     return steps
 

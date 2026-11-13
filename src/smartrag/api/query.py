@@ -10,7 +10,7 @@
 Admin operations (sources, sync, jobs, index, query logs, API keys) are not here by
 design: they run through the CLI on the operator host.
 
-Every search is logged with its `query_id` (the server-side query log, CommonRAG P3),
+Every search is logged with its `query_id` (the server-side query log, design memo §1.2, P3),
 so a wrong answer can be traced to retrieval or to the agent.
 """
 

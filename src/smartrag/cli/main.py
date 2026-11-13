@@ -3,10 +3,11 @@
     smartrag                      help
     smartrag run ...              one command, non-interactive (see `smartrag.cli.run`)
     smartrag serve ...            the Web API
+    smartrag mcp ...              the MCP server over stdio, for agents (read-only)
     smartrag version
 
-`console` (interactive session) and `mcp` (MCP over stdio) are to come. Admin commands
-run through `smartrag run` on the host that owns the kbs, never through the Web API.
+`console` (interactive session) is to come. Admin commands run through `smartrag run` on
+the host that owns the kbs, never through the Web API or MCP.
 """
 
 from __future__ import annotations
@@ -72,6 +73,23 @@ def serve(
         typer.echo(f"smartrag: {exc}", err=True)
         raise typer.Exit(2) from exc
     uvicorn.run(web_app, host=settings.host, port=settings.port, log_level=log_level)
+
+
+@app.command("mcp")
+def mcp_command(
+    home: Path = typer.Option(None, "--home", help="Folder holding all kbs "
+                                                   "[default: $SMARTRAG_HOME or ~/.smartrag]"),
+    allow_kb: list[str] = typer.Option(None, "--allow-kb",
+                                       help="Offer only this kb. Repeatable [default: all]."),
+) -> None:
+    """Run the MCP server over stdio for agents: list_kbs, describe_sources, search, read.
+
+    Always starts, even with no home or no usable kb: an MCP host shows a server that
+    fails to start as broken, not as unconfigured. stdout carries only the protocol."""
+    from smartrag.kb import Home, resolve_home
+    from smartrag.mcp import run_stdio
+
+    run_stdio(Home(resolve_home(home)), allow_kb or None)
 
 
 @app.command()
