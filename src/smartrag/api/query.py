@@ -103,7 +103,7 @@ async def _search(body: SearchRequest, request: Request, ctx: RequestContext) ->
         "query": body.query,
         "filters": body.filters.model_dump(mode="json", exclude_none=True)
         if body.filters else None,
-        "mode": body.mode,
+        "search_mode": body.search_mode,
         "group_by": body.group_by,
         "results": [r.chunk_id for r in response.results],
         "took_ms": response.took_ms,

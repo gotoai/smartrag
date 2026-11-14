@@ -12,7 +12,7 @@ after 300 s). Here:
   falls back to keywords at once instead of waiting out the timeout again.
 
 A missing credential (an unset `${VAR}`) counts as an unavailable endpoint: search still
-returns keyword results, flagged `degraded`, rather than failing.
+returns keyword results, with `search_mode` `keyword`, rather than failing.
 """
 
 from __future__ import annotations

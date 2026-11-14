@@ -7,7 +7,7 @@ import sys
 
 from mcp import Client, StdioServerParameters
 
-from smartrag.agent import DEGRADED, QueryEmbedders
+from smartrag.agent import QueryEmbedders
 from smartrag.kb import Home
 from smartrag.mcp import build_server
 from tests.test_search_read import CharEmbedder
@@ -41,7 +41,7 @@ async def test_instructions_list_only_usable_kbs(agent_home):
     assert "- legal: 税務と人事の資料: 相続税、電子申告、休暇と賃金の規程。" in text
     for hidden in ("nodesc", "empty", "later", "factory"):
         assert f"- {hidden}:" not in text
-    assert "degraded" in text and "never writes the answer" in text
+    assert "search_mode is `keyword`" in text and "never writes the answer" in text
 
 
 async def test_search_then_read(agent_home):
@@ -51,6 +51,7 @@ async def test_search_then_read(agent_home):
         data = found.structured_content
         top = data["results"][0]
         assert top["title"] == "相続.docx" and "path" not in top["citation"]
+        assert top["citation"]["file_path"].endswith("相続.md")
         text = found.content[0].text
         assert "相続" in text and "\\u" not in text  # Japanese stays readable, and cheap
         assert json.loads(text)["results"][0]["chunk_id"] == top["chunk_id"]
@@ -102,5 +103,5 @@ async def test_stdio_carries_only_the_protocol(agent_home):
         assert {t.name for t in (await client.list_tools()).tools} == TOOLS
         result = await client.call_tool("search", {"kb_id": "legal", "query": '"賃金"'})
     assert not result.is_error
-    assert result.structured_content["degraded"] == DEGRADED
+    assert result.structured_content["search_mode"] == "keyword"
     assert result.structured_content["results"][0]["file_type"] == "txt"

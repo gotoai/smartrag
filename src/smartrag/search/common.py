@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from smartrag.errors import ConfigError, CursorExpired, IndexNotReady, InvalidRequest
 from smartrag.index import SqliteIndex
 from smartrag.kb.config import KbConfig
 from smartrag.kb.home import INDEX_FILE, Home
+from smartrag.kb.manifest import normalize_path
 from smartrag.search.models import SearchFilter
 
 
@@ -29,6 +32,25 @@ class OpenKb:
 
     def close(self) -> None:
         self.store.close()
+
+    def manifest(self, docs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], DocAttributes]:
+        """Manifest attributes for `(source_id, rel_path)` pairs (design memo §3.10)."""
+        keys = {doc: (doc[0], normalize_path(doc[1])) for doc in set(docs)}
+        rows = self.store.attributes(keys.values())
+        found: dict[tuple[str, str], DocAttributes] = {}
+        for doc, key in keys.items():
+            if key in rows:
+                attributes = dict(rows[key])
+                title, link = attributes.pop("title", None), attributes.pop("link", None)
+                found[doc] = DocAttributes(title=title, link=link, attributes=attributes)
+        return found
+
+
+@dataclass
+class DocAttributes:
+    title: str | None
+    link: str | None
+    attributes: dict[str, Any]
 
 
 def open_kb(home: Home, kb_id: str, *, check_profile: bool) -> OpenKb:

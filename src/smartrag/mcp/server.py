@@ -54,13 +54,15 @@ def instructions(kbs: list[AgentKb]) -> str:
         "",
         "How to use them:",
         ("- Choose the knowledge base by its description; describe_sources tells you its "
-         "sources, file types and dates."),
+         "sources, file types, dates and what document attributes mean."),
         "- search returns passages; read widens one when you need more of it.",
         "- Cite what you use as (kb_id, doc_id, title, page).",
-        ("- When a search result has `degraded` set, only keyword search was possible: "
-         "tell the user."),
+        ("- A citation's file_path is the file's full path, and its link the document's "
+         "original web page: give them when the user wants to open or find the document."),
+        ("- When a search result's search_mode is `keyword`, vector search could not be used, "
+         "only keyword search: tell the user."),
         ("- An empty result means nothing in that knowledge base matched. It is not proof "
-         "that something does not exist, and when `degraded` is set, not even that."),
+         "that something does not exist, and when search_mode is `keyword`, not even that."),
     ]
     return "\n".join(lines)
 
@@ -133,11 +135,12 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
                                 "holds. Choose one by its description.")
     server.add_tool(describe_sources, title="Describe a knowledge base", annotations=READ_ONLY,
                     description="Describe one knowledge base: its sources, file types, date "
-                                "range and last sync, and the filter values search accepts.")
+                                "range and last sync, what its document attributes mean, and "
+                                "the filter values search accepts.")
     server.add_tool(search, title="Search a knowledge base", annotations=READ_ONLY,
                     description="Search one knowledge base for evidence: ranked passages with "
-                                "snippets and citations, never an answer. If `degraded` is set, "
-                                "only keyword search was possible: say so. read widens a "
+                                "snippets and citations, never an answer. If search_mode is "
+                                "`keyword`, say the search was keyword-only. read widens a "
                                 "passage; next_cursor gives more results.")
     server.add_tool(read, title="Read a passage", annotations=READ_ONLY,
                     description="Read a passage from a search result, widened as far as you "

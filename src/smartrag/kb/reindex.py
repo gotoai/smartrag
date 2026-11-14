@@ -3,7 +3,8 @@
 * `--refresh-stale-only`: re-process exactly the documents whose pipeline version (extractor,
   chunking, normalisation) is older than the current one. New and deleted files are left
   for the next `kb sync`. (A plain sync does this too, along with everything else.)
-* `--rebuild`: build a fresh index **beside** the live one, then swap it in. Search keeps
+* `--rebuild`: build a fresh index **beside** the live one, carry the sources' manifests
+  over, then swap it in. Search keeps
   working on the old index meanwhile, and a failed or interrupted rebuild leaves it intact.
   It is also how a kb changes its embedding model: the new index holds only the new
   profile's vectors. When the profile is unchanged, the old index lends its vectors, so a
@@ -80,8 +81,21 @@ def reindex_rebuild(home: Home, kb_id: str, *, dry_run: bool = False,
             _remove_database(fresh)
             report.error = (report.error or "interrupted") + "; the old index was kept"
             return _finish(report, started, kb_dir / "runs")
+        _carry_manifests(live, fresh)
         _swap(live, fresh)
         return _finish(report, started, kb_dir / "runs")
+
+
+def _carry_manifests(live: Path, fresh: Path) -> None:
+    """Manifests are not rebuilt from the sources: copy them over (design memo §3.10)."""
+    if not live.is_file():
+        return
+    old, new = SqliteIndex.open(live, readonly=True), SqliteIndex.open(fresh)
+    try:
+        new.copy_manifests_from(old)
+    finally:
+        old.close()
+        new.close()
 
 
 def _swap(live: Path, fresh: Path) -> None:

@@ -9,6 +9,8 @@ One file, WAL mode, one writer (the sync, under the kb lock), any number of read
 | `contents` | each distinct extracted text once, keyed by the file's hash and the pipeline version that read it (identical files share it; a new extractor gets its own) |
 | `chunks` | spans of a document's text, their heading path and location, and their vector |
 | `chunk_fts` | FTS5, contentless, over bigram-split text: BM25 for the keyword side |
+| `manifests` | per source, the applied manifest's schema, attribute keys and row count (design memo §3.10) |
+| `manifest_rows` | per source, each manifest row's attributes, keyed by the NFC-normalised path; joined to documents when results are built, so a file synced later gets its row |
 
 Vectors are float32 BLOBs. A chunk whose embedded text is unchanged keeps its vector
 across re-syncs (`vectors_for`), so editing one paragraph re-embeds one or two chunks.
@@ -22,6 +24,7 @@ from array import array
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -81,6 +84,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     content = '', contentless_delete = 1,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+CREATE TABLE IF NOT EXISTS manifests (
+    source_id  TEXT PRIMARY KEY,
+    schema     TEXT,
+    keys       TEXT NOT NULL,
+    rows       INTEGER NOT NULL,
+    applied_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manifest_rows (
+    source_id  TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    attributes TEXT NOT NULL,
+    PRIMARY KEY (source_id, path)
+);
 """
 
 
@@ -123,6 +139,15 @@ class ChunkRow:
     fts_heading: str
     fts_body: str
     fts_path: str
+
+
+@dataclass
+class ManifestInfo:
+    source_id: str
+    schema: dict[str, Any] | None
+    keys: list[str]
+    rows: int
+    applied_at: str
 
 
 class IndexStats(BaseModel):
@@ -196,6 +221,12 @@ class SqliteIndex:
 
     def close(self) -> None:
         self.db.close()
+
+    def has_table(self, table: str) -> bool:
+        """False for a table added after this index was last opened for writing: a
+        read-only connection cannot create it, and the next write does."""
+        return self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND "
+                               "name = ?", (table,)).fetchone() is not None
 
     def has_column(self, table: str, column: str) -> bool:
         return any(row[1] == column for row in self.db.execute(f"PRAGMA table_info({table})"))
@@ -314,7 +345,81 @@ class SqliteIndex:
         return count
 
     def delete_source(self, source_id: str) -> int:
+        """Remove a source's documents and its manifest."""
+        with self.db:
+            self.db.execute("DELETE FROM manifest_rows WHERE source_id = ?", (source_id,))
+            self.db.execute("DELETE FROM manifests WHERE source_id = ?", (source_id,))
         return self.delete_documents(row.doc_id for row in self.documents(source_id).values())
+
+    # --- manifests (design memo §3.10) ---------------------------------------------
+
+    def replace_manifest(self, source_id: str, rows: Sequence[tuple[str, str]],
+                         schema: str | None, keys: Sequence[str], applied_at: str) -> None:
+        """Replace a source's manifest (no rows: remove it) and advance the generation,
+        in one transaction: readers see the old manifest or the new one, never a mix."""
+        with self.db:
+            self.db.execute("DELETE FROM manifest_rows WHERE source_id = ?", (source_id,))
+            self.db.execute("DELETE FROM manifests WHERE source_id = ?", (source_id,))
+            if rows:
+                self.db.executemany(
+                    "INSERT INTO manifest_rows (source_id, path, attributes) VALUES (?, ?, ?)",
+                    ((source_id, path, attributes) for path, attributes in rows))
+                self.db.execute(
+                    "INSERT INTO manifests (source_id, schema, keys, rows, applied_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (source_id, schema, json.dumps(list(keys), ensure_ascii=False), len(rows),
+                     applied_at))
+            self.set_meta("generation", str(self.generation() + 1))
+
+    def manifests(self) -> dict[str, ManifestInfo]:
+        if not self.has_table("manifests"):
+            return {}
+        return {row["source_id"]: ManifestInfo(
+                    source_id=row["source_id"],
+                    schema=json.loads(row["schema"]) if row["schema"] else None,
+                    keys=json.loads(row["keys"]), rows=row["rows"],
+                    applied_at=row["applied_at"])
+                for row in self.db.execute("SELECT * FROM manifests ORDER BY source_id")}
+
+    def manifest_paths(self, source_id: str) -> set[str]:
+        if not self.has_table("manifest_rows"):
+            return set()
+        return {row[0] for row in self.db.execute(
+            "SELECT path FROM manifest_rows WHERE source_id = ?", (source_id,))}
+
+    def attributes(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
+        """Manifest attributes by `(source_id, NFC path)`; documents without a row are
+        absent."""
+        wanted = list(set(keys))
+        if not wanted or not self.has_table("manifest_rows"):
+            return {}
+        found: dict[tuple[str, str], dict[str, Any]] = {}
+        for i in range(0, len(wanted), 400):
+            batch = wanted[i:i + 400]
+            where = " OR ".join("(source_id = ? AND path = ?)" for _ in batch)
+            args = [part for key in batch for part in key]
+            for row in self.db.execute(
+                    f"SELECT source_id, path, attributes FROM manifest_rows WHERE {where}", args):
+                found[(row["source_id"], row["path"])] = json.loads(row["attributes"])
+        return found
+
+    def copy_manifests_from(self, other: SqliteIndex) -> None:
+        """Carry every manifest over from another index (`reindex --rebuild`), without
+        advancing this index's generation."""
+        if not other.has_table("manifests"):
+            return
+        with self.db:
+            self.db.execute("DELETE FROM manifest_rows")
+            self.db.execute("DELETE FROM manifests")
+            self.db.executemany(
+                "INSERT INTO manifests (source_id, schema, keys, rows, applied_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tuple(row) for row in other.db.execute(
+                    "SELECT source_id, schema, keys, rows, applied_at FROM manifests")))
+            self.db.executemany(
+                "INSERT INTO manifest_rows (source_id, path, attributes) VALUES (?, ?, ?)",
+                (tuple(row) for row in other.db.execute(
+                    "SELECT source_id, path, attributes FROM manifest_rows")))
 
     def collect_garbage(self) -> None:
         with self.db:

@@ -40,6 +40,13 @@ def uri_to_path(uri: str) -> Path | None:
     return Path(rest)
 
 
+def uri_to_file_path(uri: str) -> str:
+    """A document's location as people use it: the local path of a `file://` URI, any
+    other URI as it is."""
+    path = uri_to_path(uri)
+    return str(path) if path is not None else uri
+
+
 def location_to_uri(location: str) -> tuple[str, Path]:
     """Normalise what the user typed into a stored URI and an absolute local path."""
     if not location.strip():

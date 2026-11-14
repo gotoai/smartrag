@@ -1,7 +1,7 @@
 """What `kb search` and `kb read` return (design memo §3.7).
 
 These follow the Web API's search contract (`smartrag.models`) and add what a kb-aware
-search needs: the kb, the mode that actually ran, why it fell back if it did, each
+search needs: the kb, the search mode that actually ran, why it fell back if it did, each
 result's per-side ranks and freshness, and page ranges and cell locations in citations.
 When `serve` is rebuilt for kbs, it returns these same models.
 """
@@ -13,7 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-SearchMode = Literal["hybrid", "lexical", "vector"]
+SearchMode = Literal["hybrid", "keyword", "vector"]
+Attribute = str | int | float | bool | None
 GroupBy = Literal["chunk", "document"]
 ReadScope = Literal["chunk", "neighbors", "section", "document"]
 
@@ -35,11 +36,13 @@ class SearchFilter(BaseModel):
 
 
 class KbCitation(BaseModel):
-    """Where a passage came from. `path` is relative to the source root: it shows folders,
-    never a host, a bucket or an absolute path."""
+    """Where a passage came from. `path` is relative to the source root; `file_path` is
+    the whole location, for opening the file."""
 
     source_id: str
     path: str
+    file_path: str = Field(description="The file's absolute local path, or its URI for a "
+                                       "source that is not a local folder.")
     page: int | None = None
     page_end: int | None = None
     location: str | None = Field(default=None,
@@ -47,11 +50,12 @@ class KbCitation(BaseModel):
     heading_path: list[str] = Field(default_factory=list)
     origin_path: str | None = Field(
         default=None, description="For a file ingested into the sink: where it was copied from.")
-    link: str | None = None
+    link: str | None = Field(default=None, description="The document's original URL, from its "
+                                                     "source's manifest (design memo §3.10).")
 
 
 class SideRanks(BaseModel):
-    lexical: int | None = None
+    keyword: int | None = None
     vector: int | None = None
 
 
@@ -68,6 +72,9 @@ class SearchHit(BaseModel):
     citation: KbCitation
     indexed_at: str
     metadata: dict[str, str] = Field(default_factory=dict)
+    attributes: dict[str, Attribute] = Field(
+        default_factory=dict, description="The document's manifest attributes, other than "
+                                          "`title` and `link` (design memo §3.10).")
 
 
 class IndexDescription(BaseModel):
@@ -79,9 +86,10 @@ class KbSearchResponse(BaseModel):
     kb: str
     query_id: str
     query: str
-    mode: SearchMode
-    degraded: str | None = Field(
-        default=None, description="Why only keyword results were returned, if they were.")
+    search_mode: SearchMode = Field(
+        description="What actually ran: `keyword` when a hybrid search fell back.")
+    fallback_reason: str | None = Field(
+        default=None, description="Why a hybrid search fell back to keyword; only then set.")
     group_by: GroupBy
     results: list[SearchHit]
     page: int
@@ -110,6 +118,7 @@ class KbReadResponse(BaseModel):
     scope: ReadScope
     title: str
     citation: KbCitation
+    attributes: dict[str, Attribute] = Field(default_factory=dict)
     indexed_at: str
     chunks: list[ReadChunk]
     total_chunks: int = Field(description="Chunks in the whole scope, across all pages.")

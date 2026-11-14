@@ -7,8 +7,8 @@
 5. The requested page, with snippets around the best keyword match.
 
 If the embedding endpoint cannot be reached, a hybrid search returns the keyword results
-alone and says so in `degraded`; a vector-only search fails. Results are evidence only:
-there is no answer field.
+alone, with `search_mode` `keyword` and the reason in `fallback_reason`; a vector-only
+search fails. Results are evidence only: there is no answer field.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from smartrag.embedding import Embedder, HttpEmbedder
 from smartrag.errors import ConfigError, EmbedderUnavailable, InvalidRequest
 from smartrag.index import fts_query
 from smartrag.kb.home import Home
+from smartrag.kb.uris import uri_to_file_path
 from smartrag.paging import binding as request_binding
 from smartrag.search.common import OpenKb, decode_cursor, encode_cursor, filter_sql, open_kb
 from smartrag.search.models import (
@@ -49,7 +50,7 @@ _CJK = re.compile(r"[々぀-ヿ㐀-䶿一-鿿豈-﫿]+")
 
 
 def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int | None = None,
-              cursor: str | None = None, mode: SearchMode = "hybrid",
+              cursor: str | None = None, search_mode: SearchMode = "hybrid",
               group_by: GroupBy = "chunk", max_per_doc: int = 3,
               filters: SearchFilter | None = None, include: Iterable[str] = (),
               snippet_chars: int = 300, embedder: Embedder | None = None) -> KbSearchResponse:
@@ -61,7 +62,7 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
     try:
         generation = kb.store.generation()
         bound = request_binding("kb-search", kb_id, query, filters.model_dump(mode="json"),
-                                mode, group_by, max_per_doc)
+                                search_mode, group_by, max_per_doc)
         offset = (decode_cursor(cursor, bound, generation) if cursor
                   else ((page or 1) - 1) * limit)
         if offset >= DEPTH_CAP:
@@ -70,23 +71,23 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
         pool = max(BASE_POOL, 2 * (offset + limit)) * (3 if group_by == "document" else 1)
         where, args = filter_sql(filters)
 
-        lexical: list[int] = []
+        keyword: list[int] = []
         vector: list[int] = []
-        degraded: str | None = None
-        ran: SearchMode = mode
-        if mode in ("hybrid", "lexical"):
-            lexical = _lexical(kb, query, where, args, pool)
-        if mode in ("hybrid", "vector"):
+        fallback_reason: str | None = None
+        ran: SearchMode = search_mode
+        if search_mode in ("hybrid", "keyword"):
+            keyword = _keyword(kb, query, where, args, pool)
+        if search_mode in ("hybrid", "vector"):
             try:
                 vector = _vector(kb, query, where, args, pool, filters, embedder)
             except EmbedderUnavailable as exc:
-                if mode == "vector":
+                if search_mode == "vector":
                     raise
-                degraded = f"the embedding endpoint is unavailable ({exc.message}); keyword " \
-                           "results only"
-                ran = "lexical"
+                fallback_reason = f"the embedding endpoint is unavailable ({exc.message}); " \
+                                  "keyword results only"
+                ran = "keyword"
 
-        fused = _fuse(lexical, vector)
+        fused = _fuse(keyword, vector)
         ordered = _limit_per_document(kb, fused, 1 if group_by == "document" else max_per_doc)
         window = ordered[offset:offset + limit]
         end = offset + len(window)
@@ -94,8 +95,9 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
         hits = _hydrate(kb, window, offset, query, include, snippet_chars)
         assert kb.config.embedding is not None
         return KbSearchResponse(
-            kb=kb_id, query_id="q_" + uuid.uuid4().hex[:12], query=query, mode=ran,
-            degraded=degraded, group_by=group_by, results=hits, page=offset // limit + 1,
+            kb=kb_id, query_id="q_" + uuid.uuid4().hex[:12], query=query, search_mode=ran,
+            fallback_reason=fallback_reason, group_by=group_by, results=hits,
+            page=offset // limit + 1,
             next_cursor=encode_cursor(end, bound, generation) if more else None,
             index=IndexDescription(embedding_model=kb.store.meta("embedding_profile")
                                    or kb.config.embedding.profile),
@@ -128,7 +130,7 @@ def _validate(query: str, limit: int, page: int | None, cursor: str | None, max_
 # --- the two sides -----------------------------------------------------------------
 
 
-def _lexical(kb: OpenKb, query: str, where: str, args: list[object], pool: int) -> list[int]:
+def _keyword(kb: OpenKb, query: str, where: str, args: list[object], pool: int) -> list[int]:
     match = fts_query(query)
     if not match:
         return []
@@ -173,10 +175,10 @@ def _vector(kb: OpenKb, query: str, where: str, args: list[object], pool: int,
     return [int(vectors.rowids[i]) for i in top]
 
 
-def _fuse(lexical: Sequence[int], vector: Sequence[int]) -> list[tuple[int, float, SideRanks]]:
+def _fuse(keyword: Sequence[int], vector: Sequence[int]) -> list[tuple[int, float, SideRanks]]:
     scores: dict[int, float] = {}
     ranks: dict[int, SideRanks] = {}
-    for side, ids in (("lexical", lexical), ("vector", vector)):
+    for side, ids in (("keyword", keyword), ("vector", vector)):
         for rank, rowid in enumerate(ids, 1):
             scores[rowid] = scores.get(rowid, 0.0) + 1.0 / (RRF_K + rank)
             setattr(ranks.setdefault(rowid, SideRanks()), side, rank)
@@ -215,30 +217,33 @@ def _hydrate(kb: OpenKb, window: list[tuple[int, float, SideRanks]], offset: int
     marks = ",".join("?" * len(ids))
     rows = {int(row["id"]): row for row in kb.store.db.execute(
         f"SELECT c.id, c.chunk_id, c.doc_id, c.prefix, c.heading_path, c.page, c.page_end, "
-        f"c.location, d.source_id, d.rel_path, d.title, d.file_type, d.indexed_at, "
+        f"c.location, d.source_id, d.rel_path, d.uri, d.title, d.file_type, d.indexed_at, "
         f"{kb.origin_column} AS origin_path, "
         f"substr(ct.text, c.start + 1, c.end - c.start) AS text "
         f"FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
         f"JOIN contents ct ON ct.content_hash = d.content_hash WHERE c.id IN ({marks})", ids)}
+    manifest = kb.manifest((row["source_id"], row["rel_path"]) for row in rows.values())
     terms = query_terms(query)
     hits = []
     for position, (rowid, score, ranks) in enumerate(window, offset + 1):
         row = rows[rowid]
+        doc = manifest.get((row["source_id"], row["rel_path"]))
         text = str(row["text"])
         snippet, highlights = make_snippet(text, terms, snippet_chars)
         prefix = str(row["prefix"] or "")
         hits.append(SearchHit(
             rank=position, chunk_id=row["chunk_id"], doc_id=row["doc_id"],
             score=round(score, 6), ranks=ranks,
-            title=row["title"] or row["rel_path"].rsplit("/", 1)[-1], snippet=snippet,
-            highlights=highlights if "highlights" in include else None,
+            title=(doc.title if doc else None) or row["title"] or row["rel_path"].rsplit("/", 1)[-1],
+            snippet=snippet, highlights=highlights if "highlights" in include else None,
             text=(f"{prefix}\n{text}" if prefix else text) if "text" in include else None,
             citation=KbCitation(source_id=row["source_id"], path=row["rel_path"],
-                                page=row["page"], page_end=row["page_end"],
-                                location=row["location"],
+                                file_path=uri_to_file_path(row["uri"]), page=row["page"],
+                                page_end=row["page_end"], location=row["location"],
                                 heading_path=json.loads(row["heading_path"]),
-                                origin_path=row["origin_path"]),
-            indexed_at=row["indexed_at"], metadata={"file_type": row["file_type"]}))
+                                origin_path=row["origin_path"], link=doc.link if doc else None),
+            indexed_at=row["indexed_at"], metadata={"file_type": row["file_type"]},
+            attributes=doc.attributes if doc else {}))
     return hits
 
 

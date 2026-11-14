@@ -75,9 +75,9 @@ def test_ingest_copies_records_the_origin_and_indexes(home, originals):
     (row,) = _documents(home)
     assert row[0] == "sink" and row[1] == f"{folder}/{name}" and row[2] == sidecar["origin_path"]
 
-    hit = search_kb(home, "legal", "単価", mode="lexical").results[0]
+    hit = search_kb(home, "legal", "単価", search_mode="keyword").results[0]
     assert hit.citation.origin_path == sidecar["origin_path"]
-    by_folder = search_kb(home, "legal", "営業見積", mode="lexical")
+    by_folder = search_kb(home, "legal", "営業見積", search_mode="keyword")
     assert by_folder.results, "the original folder name is searchable"
 
 
@@ -162,7 +162,7 @@ def test_stale_reprocesses_only_old_documents(home, synced, monkeypatch):
 
 
 def test_rebuild_reuses_vectors_and_continues_the_generation(home, synced):
-    before = search_kb(home, "legal", "文書 内容", mode="lexical", limit=1)
+    before = search_kb(home, "legal", "文書 内容", search_mode="keyword", limit=1)
     store = SqliteIndex.open(home.root / "legal" / "index.db", readonly=True)
     old_generation = store.generation()
     store.close()
@@ -178,7 +178,7 @@ def test_rebuild_reuses_vectors_and_continues_the_generation(home, synced):
     store.close()
     assert not list((home.root / "legal").glob("index.db.rebuild*"))
     with pytest.raises(CursorExpired):
-        search_kb(home, "legal", "文書 内容", mode="lexical", limit=1, cursor=before.next_cursor)
+        search_kb(home, "legal", "文書 内容", search_mode="keyword", limit=1, cursor=before.next_cursor)
     assert search_kb(home, "legal", "文書", embedder=Embedder()).results
 
 

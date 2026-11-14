@@ -1,7 +1,7 @@
 """Opaque pagination cursors, bound to the request they page through.
 
 A cursor is base64url JSON `{"o": offset, "b": binding}`. The binding is a short hash of
-the request's identity (query, filters, mode, grouping), so a cursor from one search
+the request's identity (query, filters, search mode, grouping), so a cursor from one search
 can't be replayed against another — that is answered `400 invalid_request` instead of
 returning a silently wrong page. Clients must treat cursors as opaque.
 """
@@ -26,7 +26,7 @@ def binding(*parts: Any) -> str:
 def search_binding(request: SearchRequest) -> str:
     """The binding of a search: everything that changes its result list, not `limit`."""
     filters = request.filters.model_dump(mode="json") if request.filters else None
-    return binding("search", request.query, filters, request.mode, request.group_by)
+    return binding("search", request.query, filters, request.search_mode, request.group_by)
 
 
 def encode_cursor(offset: int, bound_to: str) -> str:

@@ -5,7 +5,7 @@ cursors, read scopes, stable/superseded ids, feedback) over a few documents held
 memory, so the API and a UI can be built before the real index exists.
 
 Ranking is deliberately simple: character-bigram overlap after NFKC normalisation, which
-works for Japanese without a word splitter. Every `mode` uses it (there are no vectors
+works for Japanese without a word splitter. Every `search_mode` uses it (there are no vectors
 here); the response's `index.embedding_model` is None to say so.
 """
 

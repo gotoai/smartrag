@@ -36,12 +36,14 @@ from smartrag.errors import NotFound, SmartRAGError
 from smartrag.kb import Home, add_source, list_sources, remove_source, resolve_home, test_source
 from smartrag.kb.config import CONFIG_FILE, DEFAULT_PROFILE
 from smartrag.kb.ingest import IngestReport, ingest_files
+from smartrag.kb.manifest import apply_manifest, clear_manifest
 from smartrag.kb.models import (
     KbCreated,
     KbList,
     KbRemoved,
     KbStatus,
     KbUpdated,
+    ManifestApplied,
     SourceAdded,
     SourceList,
     SourceRemoved,
@@ -316,7 +318,7 @@ def _stop_when_stdin_closes() -> None:
 
 class SearchModeOption(str, Enum):
     hybrid = "hybrid"
-    lexical = "lexical"
+    keyword = "keyword"
     vector = "vector"
 
 
@@ -350,8 +352,9 @@ def kb_search(
     page: int = typer.Option(None, "--page", min=1, help="Page number (for people)."),
     cursor: str = typer.Option(None, "--cursor",
                                help="The next_cursor of a previous JSON result (for programs)."),
-    mode: SearchModeOption = typer.Option(SearchModeOption.hybrid, "--mode",
-                                          help="hybrid, lexical (keyword only) or vector."),
+    search_mode: SearchModeOption = typer.Option(
+        SearchModeOption.hybrid, "--search-mode",
+        help="hybrid (keyword and vector), keyword or vector."),
     group_by: GroupByOption = typer.Option(GroupByOption.chunk, "--group-by",
                                            help="chunk: passages; document: one per file."),
     max_per_doc: int = typer.Option(3, "--max-per-doc", min=1, max=50,
@@ -378,8 +381,9 @@ def kb_search(
     filters = SearchFilter(source=source or [], file_type=file_type or [], path_prefix=path,
                            modified_after=modified_after, modified_before=modified_before)
     invoke(state, lambda: search_kb(
-        state.home, kb, query, limit=limit, page=page, cursor=cursor, mode=mode.value,
-        group_by=group_by.value, max_per_doc=max_per_doc, filters=filters,
+        state.home, kb, query, limit=limit, page=page, cursor=cursor,
+        search_mode=search_mode.value, group_by=group_by.value, max_per_doc=max_per_doc,
+        filters=filters,
         include=[i.value for i in include or []], snippet_chars=snippet_chars),
         _render_search)
 
@@ -465,6 +469,35 @@ def source_remove(
         return remove_source(state.home, kb, source)
 
     invoke(state, action, _render_source_removed)
+
+
+@source_app.command("apply")
+def source_apply(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    source: str = typer.Option(..., "--source", help="The source's id."),
+    manifest: list[Path] = typer.Option(
+        None, "--manifest", help="A JSONL manifest: one document per line, with `path` "
+                                 "relative to the source root. Repeatable; applied as one."),
+    schema: Path = typer.Option(None, "--schema",
+                                help="What each attribute means: a JSON Schema subset."),
+    clear: bool = typer.Option(False, "--clear", help="Remove the source's manifest."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                 help="Validate and count matches; change nothing."),
+) -> None:
+    """Replace a source's document attributes (title, link and others) from a manifest.
+    All or nothing; nothing is re-extracted or re-embedded."""
+    state = _state(ctx)
+    if clear and (manifest or schema):
+        raise typer.BadParameter("give --clear alone, without --manifest or --schema",
+                                 param_hint="--clear")
+    if not clear and not manifest:
+        raise typer.BadParameter("give --manifest (repeatable), or --clear",
+                                 param_hint="--manifest")
+    invoke(state, lambda: clear_manifest(state.home, kb, source, dry_run=dry_run) if clear
+           else apply_manifest(state.home, kb, source, manifest, schema=schema,
+                               dry_run=dry_run),
+           _render_manifest_applied)
 
 
 @source_app.command("test")
@@ -616,26 +649,30 @@ def _pages(page: int | None, page_end: int | None) -> str:
 
 def _render_search(r: KbSearchResponse) -> str:
     lines: list[str] = []
-    if r.degraded:
-        lines.append(f"note: {r.degraded}")
+    if r.fallback_reason:
+        lines.append(f"note: {r.fallback_reason}")
     if not r.results:
-        lines.append(f"No results for {r.query!r} ({r.mode}, {r.took_ms} ms).")
+        lines.append(f"No results for {r.query!r} ({r.search_mode}, {r.took_ms} ms).")
         return "\n".join(lines)
     for hit in r.results:
         c = hit.citation
         where = "  ".join(part for part in (
             _pages(c.page, c.page_end), c.location or "", " > ".join(c.heading_path)) if part)
         sides = " · ".join(f"{side} {rank}" for side, rank in
-                           (("lexical", hit.ranks.lexical), ("vector", hit.ranks.vector))
+                           (("keyword", hit.ranks.keyword), ("vector", hit.ranks.vector))
                            if rank is not None)
         lines.append(f"{hit.rank}. {hit.title}  {where}".rstrip() + f"    [{sides}]")
         lines.append(f"   {hit.snippet}")
         where_from = f"sink, from {c.origin_path}" if c.origin_path else f"{c.source_id}/{c.path}"
         lines.append(f"   {where_from} · chunk {hit.chunk_id}")
+        if c.link:
+            lines.append(f"   {c.link}")
+        if hit.attributes:
+            lines.append("   " + " · ".join(f"{k}: {v}" for k, v in hit.attributes.items()))
         if hit.text:
             lines.append("   " + hit.text.replace("\n", "\n   "))
     more = f" · more: --page {r.page + 1}" if r.next_cursor else ""
-    lines.append(f"page {r.page} · {len(r.results)} results · {r.mode} · {r.took_ms} ms{more}")
+    lines.append(f"page {r.page} · {len(r.results)} results · {r.search_mode} · {r.took_ms} ms{more}")
     return "\n".join(lines)
 
 
@@ -643,6 +680,10 @@ def _render_read(r: KbReadResponse) -> str:
     c = r.citation
     head = f"{r.title}  {c.source_id}/{c.path}  ({r.scope}, {r.total_chunks} chunks)"
     lines = [head]
+    if c.link:
+        lines.append(c.link)
+    if r.attributes:
+        lines.append(" · ".join(f"{k}: {v}" for k, v in r.attributes.items()))
     path: list[str] = []
     for chunk in r.chunks:
         if chunk.heading_path != path:
@@ -712,6 +753,34 @@ def _render_source_removed(result: SourceRemoved) -> str:
     if result.documents_removed is not None:
         text += f" {result.documents_removed} documents were removed from the index."
     return f"{text}\n{result.note}" if result.note else text
+
+
+def _render_manifest_applied(r: ManifestApplied) -> str:
+    if r.cleared:
+        if r.note:
+            return f"Source {r.source!r} of kb {r.kb!r}: {r.note}; nothing to clear."
+        done = "would remove" if r.dry_run else "removed"
+        return (f"Source {r.source!r} of kb {r.kb!r}: {done} its manifest "
+                f"({r.previous_rows:,} rows).")
+    head = ("Would apply" if r.dry_run else "Applied") + (
+        f" {r.rows:,} rows to source {r.source!r} of kb {r.kb!r}"
+        f"{', with a schema' if r.has_schema else ''}"
+        f"{f', replacing {r.previous_rows:,} rows' if r.previous_rows else ''}.")
+    lines = [head, f"attributes  {', '.join(r.attributes) or '(none)'}"]
+    if r.documents is not None:
+        lines.append(f"matched     {r.matched:,} of {r.documents:,} indexed documents")
+        if r.documents_without_row:
+            lines.append(f"            {r.documents_without_row:,} documents have no row")
+    if r.rows_without_document:
+        lines.append(f"waiting     {r.rows_without_document:,} rows have no document yet "
+                     f"(e.g. {', '.join(r.unmatched_examples[:3])})"
+                     if r.unmatched_examples else
+                     f"waiting     {r.rows_without_document:,} rows have no document yet")
+    if r.note:
+        lines.append(r.note)
+    if r.dry_run:
+        lines.append("Nothing was changed (--dry-run).")
+    return "\n".join(lines)
 
 
 def _render_source_test(r: SourceTestReport) -> str:

@@ -73,29 +73,29 @@ def _titles(response):
 def test_hybrid_search_ranks_and_cites(home):
     embedder = CharEmbedder()
     r = search_kb(home, "legal", "相続税の評価", embedder=embedder)
-    assert r.mode == "hybrid" and r.degraded is None and embedder.calls == ["query"]
+    assert r.search_mode == "hybrid" and r.fallback_reason is None and embedder.calls == ["query"]
     top = r.results[0]
     assert top.citation.path == "tax/相続.md" and top.rank == 1
-    assert top.ranks.lexical is not None and top.ranks.vector is not None
+    assert top.ranks.keyword is not None and top.ranks.vector is not None
     assert top.citation.heading_path == ["相続税"]
     assert top.indexed_at and top.metadata == {"file_type": "md"}
     assert "answer" not in r.model_dump()
 
 
-def test_lexical_mode_makes_no_embedding_call(home):
+def test_keyword_mode_makes_no_embedding_call(home):
     embedder = CharEmbedder()
-    r = search_kb(home, "legal", '"更正処分"', mode="lexical", embedder=embedder)
-    assert embedder.calls == [] and r.mode == "lexical"
+    r = search_kb(home, "legal", '"更正処分"', search_mode="keyword", embedder=embedder)
+    assert embedder.calls == [] and r.search_mode == "keyword"
     assert r.results and all(h.ranks.vector is None for h in r.results)
     assert "更正処分" in r.results[0].snippet
 
 
 def test_endpoint_down_degrades_hybrid_and_fails_vector(home):
     r = search_kb(home, "legal", "賃金", embedder=CharEmbedder(fail=True))
-    assert r.mode == "lexical" and "endpoint down" in (r.degraded or "")
+    assert r.search_mode == "keyword" and "endpoint down" in (r.fallback_reason or "")
     assert r.results[0].citation.path == "hr/規程.txt"
     with pytest.raises(EmbedderUnavailable):
-        search_kb(home, "legal", "賃金", mode="vector", embedder=CharEmbedder(fail=True))
+        search_kb(home, "legal", "賃金", search_mode="vector", embedder=CharEmbedder(fail=True))
 
 
 def test_query_vectors_are_cached(home):
@@ -111,7 +111,7 @@ def test_filters(home):
                         embedder=CharEmbedder())
     assert set(_titles(by_type)) <= {"hr/規程.txt"}
     by_path = search_kb(home, "legal", "相続税", filters=SearchFilter(path_prefix="hr/"),
-                        mode="lexical")
+                        search_mode="keyword")
     assert by_path.results == []
     by_source = search_kb(home, "legal", "相続税", filters=SearchFilter(source=["sink"]),
                           embedder=CharEmbedder())
@@ -155,7 +155,7 @@ def test_a_sync_expires_open_cursors(home, tmp_path):
 
 
 def test_highlights_and_text(home):
-    r = search_kb(home, "legal", "更正処分", include=["highlights", "text"], mode="lexical")
+    r = search_kb(home, "legal", "更正処分", include=["highlights", "text"], search_mode="keyword")
     hit = r.results[0]
     assert hit.highlights and all(hit.snippet[a:b] in ("更正処分", "更正", "正処", "処分")
                                   for a, b in hit.highlights)
@@ -234,14 +234,15 @@ def test_cli_search_and_read(home):
 
     runner = CliRunner()
     base = ["run", "--home", str(home.root)]
-    lexical = runner.invoke(app, [*base, "--format", "json", "kb", "search", "--kb", "legal",
-                                  "賃金", "--mode", "lexical", "--type", "txt"])
-    assert lexical.exit_code == 0, lexical.output
-    data = json.loads(lexical.stdout)
+    keyword = runner.invoke(app, [*base, "--format", "json", "kb", "search", "--kb", "legal",
+                                  "賃金", "--search-mode", "keyword", "--type", "txt"])
+    assert keyword.exit_code == 0, keyword.output
+    data = json.loads(keyword.stdout)
+    assert data["search_mode"] == "keyword" and "fallback_reason" in data
     assert data["results"][0]["citation"]["path"] == "hr/規程.txt"
-    text = runner.invoke(app, [*base, "kb", "search", "--kb", "legal", "賃金", "--mode",
-                               "lexical"])
-    assert "1. " in text.stdout and "lexical" in text.stdout
+    text = runner.invoke(app, [*base, "kb", "search", "--kb", "legal", "賃金",
+                               "--search-mode", "keyword"])
+    assert "1. " in text.stdout and "keyword" in text.stdout
     read = runner.invoke(app, [*base, "kb", "read", "--kb", "legal", "--chunk",
                                data["results"][0]["chunk_id"], "--scope", "document"])
     assert read.exit_code == 0 and "規程.txt" in read.stdout
@@ -258,7 +259,7 @@ def test_search_after_the_wal_files_are_gone(home):
     kb_dir = home.root / "legal"
     for name in ("index.db-wal", "index.db-shm"):
         (kb_dir / name).unlink(missing_ok=True)
-    result = search_kb(home, "legal", "賃金", mode="lexical")
+    result = search_kb(home, "legal", "賃金", search_mode="keyword")
     assert result.results
     assert read_chunk(home, "legal", result.results[0].chunk_id).chunks
     assert home.status("legal").index.documents == 3

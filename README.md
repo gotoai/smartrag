@@ -48,12 +48,13 @@ smartrag run --format json kb list                      # JSON for programs, err
 | `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts. On a terminal, a progress bar redrawn every `--refresh` seconds (default 1). Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
 | `kb ingest --kb ID PATH...` | Copy files (folders with `-r`) into the kb's sink and index them; copies are snapshots, the same content twice is a no-op |
 | `kb reindex --kb ID --refresh-stale-only\|--rebuild` | Re-process stale documents, or rebuild the index beside the live one and swap it in (also how a kb changes model) |
-| `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--mode`, `--group-by`, filters, `--page`/`--cursor`). Evidence only, never an answer |
+| `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--search-mode`, `--group-by`, filters, `--page`/`--cursor`). Evidence only, never an answer |
 | `kb read --kb ID --chunk CHUNK_ID` | A search result widened to `--scope neighbors|section|document`, paged by `--max-chars` |
 | `source list --kb ID` | Registered sources plus the reserved `sink` |
 | `source add --kb ID --source SID LOCATION` | Register a folder or file. Nothing is copied |
 | `source remove --kb ID --source SID` | Unregister a source |
 | `source test --kb ID --source SID` | Walk it as a sync would: matches, types, skips, unreadable paths |
+| `source apply --kb ID --source SID --manifest FILE [--schema FILE]` | Replace the source's document attributes (`title`, `link`, others) from a JSONL manifest keyed by `path`; all or nothing, no re-embedding. `--clear` removes them, `--dry-run` only counts |
 
 - The home is `--home` > `$SMARTRAG_HOME` > `~/.smartrag`; `--kb` is always required.
 - Secrets appear in `config.yaml` only as `${ENV_VAR}` references; a literal value is rejected.
@@ -119,10 +120,12 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
   configured embedding profile, and with a description. The set is fixed at startup (it is
   in the server instructions and the `kb_id` enum) and re-checked on every call; any other
   kb id is refused as `not_found`. `--allow-kb` narrows it further.
-- **No paths reach an agent**, in results or in errors: citations carry the source id, the
-  title (a file name, never a path), page, cell range and headings.
-- **Embedding endpoint down:** keyword results with `degraded` set. A query waits at most
-  10 s with one retry; after a failure the vector side is skipped for 60 s.
+- **Citations carry the document's full path** (`file_path`) and its manifest `link`, unless
+  the kb's config sets `agent.show_paths: false`; error messages never carry paths. Titles
+  are cut to file names. Manifest attributes reach agents only when `agent.attributes` in
+  the kb's config lists them.
+- **Embedding endpoint down:** keyword results, with `search_mode` `keyword`. A query waits
+  at most 10 s with one retry; after a failure the vector side is skipped for 60 s.
 - Always starts, even with no home or no usable kb. stdout carries only the protocol; logs
   go to stderr at warning level, without query text.
 

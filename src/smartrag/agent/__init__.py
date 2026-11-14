@@ -7,7 +7,7 @@ Core library, no MCP dependency: the MCP server (`smartrag.mcp`) is a thin adapt
 from smartrag.agent.catalog import MAX_DESCRIPTION, AgentCatalog, agent_description
 from smartrag.agent.embedders import QueryEmbedders
 from smartrag.agent.errors import agent_error
-from smartrag.agent.service import DEGRADED, AgentService, safe_title
+from smartrag.agent.service import AgentService, safe_title
 
-__all__ = ["DEGRADED", "MAX_DESCRIPTION", "AgentCatalog", "AgentService", "QueryEmbedders",
+__all__ = ["MAX_DESCRIPTION", "AgentCatalog", "AgentService", "QueryEmbedders",
            "agent_description", "agent_error", "safe_title"]

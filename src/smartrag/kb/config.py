@@ -187,6 +187,29 @@ class RemoteConfig(_Strict):
                          "(plain http:// is allowed only on a loopback address)")
 
 
+class AgentConfig(_Strict):
+    """What agents see of this kb, beyond what they always see (design memo §3.9)."""
+
+    show_paths: bool = True
+    """Give agents each document's full path, and its manifest `link`, in citations. Turn
+    off for a kb whose folder names or intranet hosts are themselves sensitive."""
+    attributes: list[str] = Field(default_factory=list)
+    """Manifest attributes agents may see (design memo §3.10). `title` is always shown and
+    `link` follows `show_paths`, so neither is listed."""
+
+    @field_validator("attributes")
+    @classmethod
+    def _plain_keys(cls, value: list[str]) -> list[str]:
+        keys = [key.strip() for key in value]
+        for key in keys:
+            if not key:
+                raise ValueError("agent.attributes has an empty name")
+            if key in ("path", "title", "link"):
+                raise ValueError(f"agent.attributes cannot list {key!r}: `title` is always "
+                                 "shown, `link` follows show_paths, `path` is not an attribute")
+        return list(dict.fromkeys(keys))
+
+
 class KbConfig(_Strict):
     version: int = CONFIG_VERSION
     id: str
@@ -198,6 +221,7 @@ class KbConfig(_Strict):
     sink: str | None = None
     sources: list[SourceConfig] = Field(default_factory=list)
     remote: RemoteConfig | None = None
+    agent: AgentConfig = Field(default_factory=AgentConfig)
 
     @field_validator("id")
     @classmethod
@@ -392,6 +416,11 @@ class ConfigDocument:
             data.yaml_set_comment_before_after_key(
                 "sources", before="Folders `kb sync` follows. Edit with `smartrag run source "
                                   "add|remove`, or by hand.")
+            data["agent"] = CommentedMap(model.agent.model_dump(mode="json"))
+            data.yaml_set_comment_before_after_key(
+                "agent", before="What agents see. show_paths: each document's full path and "
+                                "link in citations; false for a kb whose folder names are "
+                                "sensitive. attributes: manifest attributes agents may see.")
         document = cls(path, data, model)
         document._revalidate()
         return document

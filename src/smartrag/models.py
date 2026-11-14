@@ -100,7 +100,7 @@ class SearchFilters(_Request):
     path_prefix: str | None = None
 
 
-SearchMode = Literal["hybrid", "vector", "lexical"]
+SearchMode = Literal["hybrid", "keyword", "vector"]
 GroupBy = Literal["chunk", "document"]
 SearchInclude = Literal["highlights", "facets", "text"]
 
@@ -112,7 +112,7 @@ class SearchRequest(_Request):
     filters: SearchFilters | None = None
     limit: int = Field(default=10, ge=1, le=50)
     cursor: str | None = Field(default=None, description="`next_cursor` of a previous page.")
-    mode: SearchMode = "hybrid"
+    search_mode: SearchMode = "hybrid"
     group_by: GroupBy = Field(
         default="chunk",
         description="`chunk`: passage-level evidence (agents). `document`: one result "

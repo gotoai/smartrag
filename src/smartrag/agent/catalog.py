@@ -14,11 +14,18 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime
+from typing import Any
 
-from smartrag.agent.models import AgentKb, FilterInfo, KbDescription, SourceSummary
+from smartrag.agent.models import (
+    AgentKb,
+    AttributeInfo,
+    FilterInfo,
+    KbDescription,
+    SourceSummary,
+)
 from smartrag.errors import NotFound
 from smartrag.index import SqliteIndex
-from smartrag.kb.config import MAX_DESCRIPTION
+from smartrag.kb.config import MAX_DESCRIPTION, AgentConfig
 from smartrag.kb.home import INDEX_FILE, Home
 
 
@@ -58,8 +65,10 @@ class AgentCatalog:
                 "GROUP BY source_id, file_type ORDER BY source_id, file_type").fetchall()
             as_of = store.meta("last_sync_at") or store.db.execute(
                 "SELECT MAX(indexed_at) FROM documents").fetchone()[0]
+            manifests = store.manifests()
         finally:
             store.close()
+        agent = self.home.load(kb_id).agent
         sources: dict[str, SourceSummary] = {}
         for row in rows:
             summary = sources.setdefault(row["source_id"], SourceSummary(
@@ -69,6 +78,10 @@ class AgentCatalog:
             first, last = _day(row["first"]), _day(row["last"])
             summary.modified_from = min(filter(None, (summary.modified_from, first)), default=None)
             summary.modified_to = max(filter(None, (summary.modified_to, last)), default=None)
+        for source_id, summary in sources.items():
+            manifest = manifests.get(source_id)
+            if manifest is not None:
+                summary.attributes = _attribute_info(manifest.keys, manifest.schema, agent)
         types = sorted({t for s in sources.values() for t in s.file_types})
         dates = "YYYY-MM-DD, or an ISO datetime"
         return KbDescription(
@@ -100,6 +113,15 @@ class AgentCatalog:
         if not has_documents or (held is not None and held != config.embedding.profile):
             return None
         return AgentKb(kb_id=kb_id, description=description)
+
+
+def _attribute_info(keys: list[str], schema: dict[str, Any] | None,
+                    agent: AgentConfig) -> list[AttributeInfo]:
+    """What an agent may see of a source's manifest: `title`, `link` while paths are
+    shown, and the allow-listed keys, each with its schema's meaning when there is one."""
+    shown = ["title"] + (["link"] if agent.show_paths else []) + agent.attributes
+    properties = (schema or {}).get("properties", {})
+    return [AttributeInfo(name=key, **properties.get(key, {})) for key in shown if key in keys]
 
 
 def _day(mtime_ns: int | None) -> str | None:

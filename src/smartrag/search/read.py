@@ -16,13 +16,14 @@ import sqlite3
 
 from smartrag.errors import ChunkSuperseded, InvalidRequest, NotFound
 from smartrag.kb.home import Home
+from smartrag.kb.uris import uri_to_file_path
 from smartrag.paging import binding as request_binding
 from smartrag.search.common import decode_cursor, encode_cursor, open_kb
 from smartrag.search.models import KbCitation, KbReadResponse, ReadChunk, ReadScope
 
 _CHUNK_SQL = (
     "SELECT c.id, c.chunk_id, c.doc_id, c.ordinal, c.prefix, c.heading_path, c.page, "
-    "c.page_end, c.location, d.source_id, d.rel_path, d.title, d.indexed_at, "
+    "c.page_end, c.location, d.source_id, d.rel_path, d.uri, d.title, d.indexed_at, "
     "{origin} AS origin_path, substr(ct.text, c.start + 1, c.end - c.start) AS text "
     "FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
     "JOIN contents ct ON ct.content_hash = d.content_hash ")
@@ -86,15 +87,17 @@ def read_chunk(home: Home, kb_id: str, chunk_id: str, *, scope: ReadScope = "chu
                 chunk_id=row["chunk_id"], ordinal=row["ordinal"], text=text,
                 prefix=row["prefix"] or "", heading_path=json.loads(row["heading_path"]),
                 page=row["page"], page_end=row["page_end"], location=row["location"]))
+        doc = kb.manifest([(anchor["source_id"], anchor["rel_path"])]).get(
+            (anchor["source_id"], anchor["rel_path"]))
         return KbReadResponse(
             kb=kb_id, chunk_id=chunk_id, doc_id=anchor["doc_id"], scope=scope,
-            title=anchor["title"] or anchor["rel_path"].rsplit("/", 1)[-1],
+            title=(doc.title if doc else None) or anchor["title"] or anchor["rel_path"].rsplit("/", 1)[-1],
             citation=KbCitation(source_id=anchor["source_id"], path=anchor["rel_path"],
-                                page=anchor["page"], page_end=anchor["page_end"],
-                                location=anchor["location"],
+                                file_path=uri_to_file_path(anchor["uri"]), page=anchor["page"],
+                                page_end=anchor["page_end"], location=anchor["location"],
                                 heading_path=json.loads(anchor["heading_path"]),
-                                origin_path=anchor["origin_path"]),
-            indexed_at=anchor["indexed_at"], chunks=views, total_chunks=len(selected),
+                                origin_path=anchor["origin_path"], link=doc.link if doc else None),
+            attributes=doc.attributes if doc else {}, indexed_at=anchor["indexed_at"], chunks=views, total_chunks=len(selected),
             truncated=truncated, page=index + 1,
             next_cursor=encode_cursor(index + 1, bound, generation)
             if index + 1 < len(pages) else None)

@@ -13,7 +13,7 @@ library's `SmartRAGError`s; `smartrag.agent.errors` turns them into what an agen
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 
 from smartrag.agent.catalog import AgentCatalog
@@ -25,14 +25,15 @@ from smartrag.agent.models import (
     AgentReadChunk,
     AgentReadResponse,
     AgentSearchResponse,
+    Attribute,
     KbDescription,
     ReadScope,
 )
 from smartrag.errors import InvalidRequest
+from smartrag.kb.config import AgentConfig
 from smartrag.kb.home import Home
 from smartrag.search import KbCitation, SearchFilter, read_chunk, search_kb
 
-DEGRADED = "The embedding service is unavailable; these are keyword results only."
 READ_WINDOW = 1
 """Chunks on each side for `scope=neighbors`: the library's default."""
 READ_MAX_CHARS = 8000
@@ -50,10 +51,19 @@ def safe_title(title: str) -> str:
     return title
 
 
-def _citation(citation: KbCitation) -> AgentCitation:
-    return AgentCitation(source_id=citation.source_id, page=citation.page,
+def _citation(citation: KbCitation, agent: AgentConfig) -> AgentCitation:
+    return AgentCitation(source_id=citation.source_id,
+                         file_path=citation.file_path if agent.show_paths else None,
+                         page=citation.page,
                          page_end=citation.page_end, location=citation.location,
-                         heading_path=citation.heading_path)
+                         heading_path=citation.heading_path,
+                         link=citation.link if agent.show_paths else None)
+
+
+def _attributes(attributes: Mapping[str, Attribute], agent: AgentConfig) -> dict[str, Attribute]:
+    """Only what the kb's config allow-lists: the manifest never decides what an agent
+    sees (design memo §3.10)."""
+    return {key: attributes[key] for key in agent.attributes if key in attributes}
 
 
 def _moment(value: str | None, name: str) -> datetime | None:
@@ -101,22 +111,26 @@ class AgentService:
                       embedder=self.embedders.get(kb_id, config.embedding))
         return AgentSearchResponse(
             kb_id=kb_id, query_id=r.query_id, query=r.query,
-            degraded=DEGRADED if r.degraded else None,
+            search_mode="keyword" if r.search_mode == "keyword" else "hybrid",
             results=[AgentHit(rank=h.rank, chunk_id=h.chunk_id, doc_id=h.doc_id,
                               title=safe_title(h.title), snippet=h.snippet,
-                              citation=_citation(h.citation), indexed_at=h.indexed_at,
-                              file_type=h.metadata.get("file_type", ""))
+                              citation=_citation(h.citation, config.agent),
+                              indexed_at=h.indexed_at,
+                              file_type=h.metadata.get("file_type", ""),
+                              attributes=_attributes(h.attributes, config.agent))
                      for h in r.results],
             next_cursor=r.next_cursor)
 
     def read(self, kb_id: str, chunk_id: str, *, scope: ReadScope = "chunk",
              cursor: str | None = None) -> AgentReadResponse:
         self.catalog.require(kb_id)
+        agent = self.home.load(kb_id).agent
         r = read_chunk(self.home, kb_id, chunk_id, scope=scope, window=READ_WINDOW,
                        max_chars=READ_MAX_CHARS, cursor=cursor)
         return AgentReadResponse(
             kb_id=kb_id, chunk_id=r.chunk_id, doc_id=r.doc_id, scope=r.scope,
-            title=safe_title(r.title), citation=_citation(r.citation), indexed_at=r.indexed_at,
+            title=safe_title(r.title), citation=_citation(r.citation, agent),
+            attributes=_attributes(r.attributes, agent), indexed_at=r.indexed_at,
             chunks=[AgentReadChunk(chunk_id=c.chunk_id, ordinal=c.ordinal, text=c.text,
                                    prefix=c.prefix, heading_path=c.heading_path, page=c.page,
                                    page_end=c.page_end, location=c.location)

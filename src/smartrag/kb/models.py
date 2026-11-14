@@ -126,6 +126,30 @@ class SourceRemoved(BaseModel):
     note: str | None = None
 
 
+class ManifestApplied(BaseModel):
+    """`source apply`: what a manifest matched, or would match with `--dry-run`."""
+
+    kb: str
+    source: str
+    dry_run: bool = False
+    cleared: bool = Field(default=False, description="`--clear`: the manifest was removed.")
+    rows: int = 0
+    attributes: list[str] = Field(default_factory=list,
+                                  description="The attribute keys the rows use.")
+    has_schema: bool = Field(default=False,
+                             description="Whether a schema was applied with the rows.")
+    previous_rows: int = Field(default=0, description="Rows in the manifest replaced.")
+    documents: int | None = Field(default=None,
+                                  description="The source's indexed documents; None before "
+                                              "the first sync.")
+    matched: int = 0
+    rows_without_document: int = 0
+    documents_without_row: int = 0
+    unmatched_examples: list[str] = Field(default_factory=list,
+                                          description="Up to five rows with no document.")
+    note: str | None = None
+
+
 class PathError(BaseModel):
     path: str
     error: str

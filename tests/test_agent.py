@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from smartrag.agent import (
-    DEGRADED,
     MAX_DESCRIPTION,
     AgentService,
     QueryEmbedders,
@@ -101,20 +100,34 @@ def test_describe_sources(agent_home):
     assert set(filters) == {"source", "file_type", "modified_after", "modified_before"}
 
 
-def test_search_and_read_carry_no_paths(agent_home, tmp_path):
+def test_search_and_read_carry_the_full_path(agent_home, tmp_path):
     service = _service(agent_home)
     r = service.search("legal", "相続税の評価")
     top = r.results[0]
     assert top.title == "相続.docx" and top.citation.heading_path == ["相続税"]
-    assert top.file_type == "md" and top.indexed_at and r.degraded is None
+    assert top.file_type == "md" and top.indexed_at and r.search_mode == "hybrid"
+    full = str(tmp_path / "docs" / "tax" / "相続.md")
+    assert top.citation.file_path == full
     read = service.read("legal", top.chunk_id, scope="document")
     assert read.title == "相続.docx" and read.scope == "document"
     assert read.chunks and len(read.chunks) == read.total_chunks
+    assert read.citation.file_path == full
     for model in (r, read):
-        assert not _keys(model.model_dump()) & {"path", "origin_path", "rel_path", "uri", "link"}
+        assert not _keys(model.model_dump()) & {"path", "origin_path", "rel_path", "uri"}
+        assert "C:\\" not in model.model_dump_json()  # a title is still never a path
+
+
+def test_a_kb_can_hide_paths(agent_home, tmp_path):
+    config = agent_home.kb_dir("legal") / "config.yaml"
+    text = config.read_text(encoding="utf-8")
+    assert "show_paths: true" in text  # new kbs spell the setting out
+    config.write_text(text.replace("show_paths: true", "show_paths: false"), encoding="utf-8")
+    service = _service(agent_home)
+    r = service.search("legal", "相続税の評価")
+    read = service.read("legal", r.results[0].chunk_id, scope="document")
+    for model in (r, read):
         dumped = model.model_dump_json()
-        assert "tax/" not in dumped and "C:\\" not in dumped
-        assert str(tmp_path) not in dumped and "Users" not in dumped
+        assert "tax/" not in dumped and str(tmp_path) not in dumped and "Users" not in dumped
 
 
 def _keys(value) -> set[str]:
@@ -150,8 +163,9 @@ def test_endpoint_down_degrades_with_a_fixed_sentence_and_fails_fast(agent_home)
     down = CharEmbedder(fail=True)
     service = _service(agent_home, down, clock=clock)
     first = service.search("legal", "賃金")
-    assert first.degraded == DEGRADED and first.results and len(down.calls) == 1
-    assert service.search("legal", "相続税").degraded == DEGRADED
+    assert first.search_mode == "keyword"
+    assert first.results and len(down.calls) == 1
+    assert service.search("legal", "相続税").search_mode == "keyword"
     assert len(down.calls) == 1  # skipped during the cooldown, no wait
     clock.now += 61
     service.search("legal", "電子申告")
@@ -162,7 +176,7 @@ def test_a_missing_credential_degrades_instead_of_failing(agent_home, monkeypatc
     monkeypatch.delenv("SMARTRAG_EMBED_BASE_URL", raising=False)
     monkeypatch.delenv("SMARTRAG_EMBED_API_KEY", raising=False)
     r = AgentService(agent_home).search("legal", "賃金")
-    assert r.degraded == DEGRADED and r.results
+    assert r.search_mode == "keyword" and r.results
 
 
 def test_the_embedder_is_checked_once_per_kb(agent_home):
