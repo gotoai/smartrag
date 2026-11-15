@@ -172,7 +172,7 @@ def test_endpoint_down_degrades_with_a_fixed_sentence_and_fails_fast(agent_home)
     assert len(down.calls) == 2
 
 
-def test_a_missing_credential_degrades_instead_of_failing(agent_home, monkeypatch):
+def test_a_missing_endpoint_falls_back_to_keyword_search(agent_home, monkeypatch):
     monkeypatch.delenv("SMARTRAG_EMBED_BASE_URL", raising=False)
     monkeypatch.delenv("SMARTRAG_EMBED_API_KEY", raising=False)
     r = AgentService(agent_home).search("legal", "賃金")

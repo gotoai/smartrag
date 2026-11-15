@@ -11,8 +11,9 @@ after 300 s). Here:
 * after a failure, the vector side is skipped for `COOLDOWN` seconds, so each search
   falls back to keywords at once instead of waiting out the timeout again.
 
-A missing credential (an unset `${VAR}`) counts as an unavailable endpoint: search still
-returns keyword results, with `search_mode` `keyword`, rather than failing.
+An endpoint that cannot be configured (its base URL's `${VAR}` unset) counts as
+unavailable: search still returns keyword results, with `search_mode` `keyword`, rather
+than failing. An unset or empty API key is not an error: no key is sent.
 """
 
 from __future__ import annotations

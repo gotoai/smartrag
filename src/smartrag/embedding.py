@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
 from smartrag.errors import ConfigError, EmbedderUnavailable
-from smartrag.kb.config import EmbeddingConfig, resolve_refs
+from smartrag.kb.config import EmbeddingConfig, resolve_optional_ref, resolve_refs
 
 InputType = Literal["document", "query"]
 
@@ -46,12 +46,8 @@ class HttpEmbedder:
         self.profile = config.profile
         self.batch_size = config.batch_size
         url = resolve_refs(config.base_url, environ).rstrip("/")
-        try:
-            self.api_key = resolve_refs(config.api_key, environ) if config.api_key else None
-        except ConfigError as exc:
-            raise ConfigError(f"{exc.message}. embedding.api_key refers to it; if the endpoint "
-                              "needs no key, remove `api_key` from config.yaml",
-                              exc.details) from exc
+        self.api_key = resolve_optional_ref(config.api_key, environ)
+        self._key_ref = config.api_key
         if url.endswith("/embeddings"):
             self.url, self.models_url = url, url[: -len("/embeddings")] + "/models"
         else:
@@ -82,6 +78,10 @@ class HttpEmbedder:
                     return json.load(response)
             except urllib.error.HTTPError as exc:
                 last = f"HTTP {exc.code}: {_detail(exc)}"
+                if exc.code in (401, 403) and not self.api_key:
+                    last += (f"; no API key was sent ({self._key_ref} is empty or not set)"
+                             if self._key_ref else
+                             "; no API key was sent (config.yaml has no embedding.api_key)")
                 if exc.code not in _RETRYABLE:
                     break
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:

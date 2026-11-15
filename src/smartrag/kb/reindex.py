@@ -34,9 +34,10 @@ _SIDE_FILES = ("-wal", "-shm")
 
 def reindex_stale(home: Home, kb_id: str, *, dry_run: bool = False,
                   embedder: Embedder | None = None,
-                  progress: Callable[[dict[str, Any]], None] | None = None) -> SyncReport:
+                  progress: Callable[[dict[str, Any]], None] | None = None,
+                  embedding_parallelism: int | None = None) -> SyncReport:
     return sync_kb(home, kb_id, dry_run=dry_run, only_stale=True, embedder=embedder,
-                   progress=progress)
+                   progress=progress, embedding_parallelism=embedding_parallelism)
 
 
 def _remove_database(path: Path) -> None:
@@ -46,8 +47,10 @@ def _remove_database(path: Path) -> None:
 
 def reindex_rebuild(home: Home, kb_id: str, *, dry_run: bool = False,
                     embedder: Embedder | None = None,
-                    progress: Callable[[dict[str, Any]], None] | None = None) -> SyncReport:
-    config, targets, report = _prepare(home, kb_id, None, dry_run, "reindex-rebuild")
+                    progress: Callable[[dict[str, Any]], None] | None = None,
+                    embedding_parallelism: int | None = None) -> SyncReport:
+    config, targets, report = _prepare(home, kb_id, None, dry_run, "reindex-rebuild",
+                                       embedding_parallelism)
     kb_dir = home.kb_dir(kb_id)
     live = kb_dir / INDEX_FILE
     started = time.monotonic()

@@ -103,7 +103,8 @@ def _collect(paths: list[str], recursive: bool, kb_dir: Path,
 
 def ingest_files(home: Home, kb_id: str, paths: list[str], *, recursive: bool = False,
                  dry_run: bool = False, embedder: Embedder | None = None,
-                 progress: Callable[[dict[str, Any]], None] | None = None) -> IngestReport:
+                 progress: Callable[[dict[str, Any]], None] | None = None,
+                 embedding_parallelism: int | None = None) -> IngestReport:
     from smartrag.kb.sync import sync_kb
 
     config = home.load(kb_id)
@@ -179,7 +180,7 @@ def ingest_files(home: Home, kb_id: str, paths: list[str], *, recursive: bool = 
             report.copied += 1
             report.bytes_copied += size
     report.sync = sync_kb(home, kb_id, source=SINK_ID, embedder=embedder, progress=progress,
-                          operation="ingest")
+                          operation="ingest", embedding_parallelism=embedding_parallelism)
     return report
 
 

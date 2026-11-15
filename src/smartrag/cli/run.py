@@ -181,6 +181,10 @@ def kb_sync(
         help="Stop cleanly when stdin closes: how a parent app (Kari) says it has gone."),
     refresh: float = typer.Option(1.0, "--refresh", min=0.1, metavar="SECONDS",
                                   help="How often the progress bar is redrawn."),
+    embedding_parallelism: int = typer.Option(
+        None, "--embedding-parallelism", min=1, metavar="N",
+        help="Embedding requests in flight at once, each in a worker process; raise it for "
+             "a remote endpoint [default: the kb's embedding.parallelism]."),
 ) -> None:
     """Bring the kb's index in line with its sources.
 
@@ -192,7 +196,7 @@ def kb_sync(
     try:
         with _progress(state, refresh) as progress:
             report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
-                             progress=progress)
+                             progress=progress, embedding_parallelism=embedding_parallelism)
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -229,6 +233,10 @@ def kb_ingest(
                                  help="Report what would be copied and embedded; copy nothing."),
     exit_with_parent: bool = typer.Option(False, "--exit-with-parent",
                                           help="Stop cleanly when stdin closes."),
+    embedding_parallelism: int = typer.Option(
+        None, "--embedding-parallelism", min=1, metavar="N",
+        help="Embedding requests in flight at once, each in a worker process; raise it for "
+             "a remote endpoint [default: the kb's embedding.parallelism]."),
 ) -> None:
     """Copy files into the kb's sink and index them. The copies are snapshots: later
     changes to the originals are not picked up (use `source add` to follow a folder).
@@ -240,7 +248,8 @@ def kb_ingest(
     try:
         with _progress(state) as progress:
             report = ingest_files(state.home, kb, paths, recursive=recursive, dry_run=dry_run,
-                                  progress=progress)
+                                  progress=progress,
+                                  embedding_parallelism=embedding_parallelism)
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -264,6 +273,10 @@ def kb_reindex(
     yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation (--rebuild)."),
     exit_with_parent: bool = typer.Option(False, "--exit-with-parent",
                                           help="Stop cleanly when stdin closes."),
+    embedding_parallelism: int = typer.Option(
+        None, "--embedding-parallelism", min=1, metavar="N",
+        help="Embedding requests in flight at once, each in a worker process; raise it for "
+             "a remote endpoint [default: the kb's embedding.parallelism]."),
 ) -> None:
     """Re-process stale documents, or rebuild the index. Give exactly one of --refresh-stale-only and
     --rebuild. Exit codes as `kb sync`."""
@@ -280,9 +293,11 @@ def kb_reindex(
                                 "profile is unchanged. Search keeps working meanwhile.")
         with _progress(state) as progress:
             if refresh_stale_only:
-                report = reindex_stale(state.home, kb, dry_run=dry_run, progress=progress)
+                report = reindex_stale(state.home, kb, dry_run=dry_run, progress=progress,
+                                       embedding_parallelism=embedding_parallelism)
             else:
-                report = reindex_rebuild(state.home, kb, dry_run=dry_run, progress=progress)
+                report = reindex_rebuild(state.home, kb, dry_run=dry_run, progress=progress,
+                                         embedding_parallelism=embedding_parallelism)
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -624,7 +639,9 @@ def _render_sync(r: SyncReport) -> str:
         lines.append(f"chunks     {r.chunks_written:,} written: {r.chunks_embedded:,} embedded, "
                      f"{r.chunks_reused:,} reused (about {r.tokens_estimated:,} tokens)")
     t = r.timings_ms
-    lines.append("time       " + ", ".join(f"{k} {v / 1000:.1f} s" for k, v in t.items()))
+    lines.append("time       " + ", ".join(f"{k} {v / 1000:.1f} s" for k, v in t.items())
+                 + (f" (embed summed over up to {r.embedding_parallelism} requests in flight)"
+                    if r.embedding_parallelism > 1 and not r.dry_run else ""))
     for s in r.sources:
         state = "" if s.complete else " (incomplete listing)"
         note = f": {s.note}" if s.note else ""

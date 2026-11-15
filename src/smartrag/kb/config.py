@@ -110,10 +110,16 @@ class EmbeddingConfig(_Strict):
     base_url: str = f"${{{DEFAULT_EMBED_URL_ENV}}}"
     """The endpoint's base (`…/v1`) or its full `…/v1/embeddings` URL."""
     api_key: str | None = None
-    """Omit (or `null`) for an endpoint without authentication; no header is sent."""
+    """A `${VAR}` reference. Omit it, or leave its variable unset or empty, for an endpoint
+    without authentication: then no Authorization header is sent at all."""
     profile: str = DEFAULT_PROFILE
     batch_size: int = Field(default=32, ge=1, le=2048)
     """Texts per request. Keep within the endpoint's per-request input cap."""
+    parallelism: int = Field(default=1, ge=1)
+    """The most embedding requests `sync` keeps in flight at once, each in its own worker
+    process. 1 sends them one at a time, with no worker processes. A remote endpoint,
+    where each request waits for a network round trip, indexes faster with more.
+    `--embedding-parallelism` overrides it for one run."""
 
     @field_validator("api_key")
     @classmethod
@@ -289,6 +295,18 @@ def resolve_refs(value: str, environ: dict[str, str] | None = None) -> str:
     return _ENV_REF_ANYWHERE.sub(lambda m: env[m.group(1)], value)
 
 
+def resolve_optional_ref(value: str | None, environ: dict[str, str] | None = None) -> str | None:
+    """An optional secret such as `embedding.api_key`: None when the config names none, or
+    when a variable it refers to is unset, empty or only whitespace. The caller then sends
+    no credential at all, rather than an empty one, which some servers reject."""
+    if not value:
+        return None
+    env = os.environ if environ is None else environ
+    if any(not env.get(name, "").strip() for name in _ENV_REF_ANYWHERE.findall(value)):
+        return None
+    return resolve_refs(value, environ).strip() or None
+
+
 def _strings(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -407,7 +425,9 @@ class ConfigDocument:
                                                                         exclude_none=True))
             data.yaml_set_comment_before_after_key(
                 "embedding", before="Where vectors come from. The profile id is stored with "
-                                    "every vector; changing it means `kb reindex`.")
+                                    "every vector; changing it means `kb reindex`. "
+                                    "parallelism: embedding requests in flight at once "
+                                    "during sync; raise it for a remote endpoint.")
             data["chunk"] = CommentedMap(model.chunk.model_dump(mode="json"))
             data["sink"] = model.sink
             data.yaml_set_comment_before_after_key(

@@ -220,6 +220,8 @@ class SyncReport(BaseModel):
     took_ms: int = 0
     profile: str
     pipeline_version: str
+    embedding_parallelism: int = 1
+    """The most embedding requests in flight at once during this run."""
     sources: list[SourceSync] = Field(default_factory=list)
     counts: SyncCounts = Field(default_factory=SyncCounts)
     chunks_written: int = 0

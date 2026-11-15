@@ -19,7 +19,12 @@ Files that cannot be indexed are recorded too (`skipped`: unsupported type, no t
 `dry_run` lists, extracts and chunks — so it can report documents, chunks, estimated
 tokens and problems — but calls no embedding endpoint and writes nothing.
 
-An interrupted sync loses at most the document in progress; running it again resumes.
+With `embedding.parallelism` above 1 (§3.11), step 3's embedding requests go to worker
+processes, up to that many at once, while this process goes on extracting the next files;
+a document is written when all its requests are back, so documents finish out of listing
+order. Everything else stays in this process, which alone touches the index.
+
+An interrupted sync loses at most the documents in progress; running it again resumes.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +47,7 @@ from smartrag.extract.units import EXTRACTOR_VERSION, Extracted, extract
 from smartrag.index import LEXIFY_VERSION, SqliteIndex, lexify
 from smartrag.index.store import ChunkRow, DocumentRow, unpack_vector
 from smartrag.kb.config import SINK_ID, KbConfig
+from smartrag.kb.embed_pool import EmbedPool
 from smartrag.kb.home import INDEX_FILE, Home
 from smartrag.kb.lock import kb_lock
 from smartrag.kb.models import SourceSync, SyncIssue, SyncReport
@@ -81,6 +88,18 @@ def doc_id_for(source: str, rel_path: str) -> str:
     return "d_" + _sha256(f"{source}\0{rel_path}")[:20]
 
 
+@dataclass
+class _Pending:
+    """A document whose embedding requests are in flight."""
+
+    document: DocumentRow
+    text: str
+    rows: list[ChunkRow]
+    status: str
+    embedded: int
+    requests: int = 0
+
+
 class _Run:
     def __init__(self, home: Home, config: KbConfig, store: SqliteIndex | None,
                  embedder: Embedder | None, report: SyncReport, force: bool,
@@ -99,6 +118,13 @@ class _Run:
         self.version = report.pipeline_version
         self.profile = report.profile
         self.timings = {"list": 0, "extract": 0, "embed": 0, "write": 0}
+        self.pool: EmbedPool | None = None
+        if embedder is not None and report.embedding_parallelism > 1:
+            self.pool = EmbedPool(embedder, report.embedding_parallelism)
+        self.dimensions: int | None = None
+        """The length of the vectors the workers returned."""
+        self._done = 0
+        self._total = 0
 
     # --- reporting -----------------------------------------------------------------
 
@@ -129,12 +155,15 @@ class _Run:
         existing = self.store.documents(target.source) if self.store else {}
 
         seen: set[str] = set()
-        for number, listed in enumerate(listing.files, 1):
+        self._done, self._total = 0, len(listing.files)
+        for listed in listing.files:
             seen.add(listed.rel)
             old = existing.get((target.source, listed.rel))
-            status, chunks = self._file(target, listed, old)
-            self._emit(event="document", source=target.source, path=listed.rel,
-                       status=status, chunks=chunks, n=number, total=len(listing.files))
+            result = self._file(target, listed, old)
+            if result is not None:  # else its embedding requests are in flight
+                self._document_done(target.source, listed.rel, *result)
+        while self.pool is not None and self.pool.in_flight:
+            self._collect(block=True)
 
         if self.only_stale:
             return  # removals are the next sync's job
@@ -149,8 +178,15 @@ class _Run:
             info.removed = len(gone)
             self.report.counts.removed += len(gone)
 
+    def _document_done(self, source: str, path: str, status: str, chunks: int) -> None:
+        self._done += 1
+        self._emit(event="document", source=source, path=path, status=status, chunks=chunks,
+                   n=self._done, total=self._total)
+
     def _file(self, target: SyncTarget, listed: ListedFile,
-              old: DocumentRow | None) -> tuple[str, int]:
+              old: DocumentRow | None) -> tuple[str, int] | None:
+        """The file's status and chunk count, or None while its embedding requests are in
+        flight."""
         counts = self.report.counts
         if self.only_stale and (old is None or old.pipeline_version == self.version):
             if old is not None and (old.size, old.mtime_ns) == (listed.size, listed.mtime_ns):
@@ -235,7 +271,7 @@ class _Run:
             origin_path=_origin_of(listed.path) if target.source == SINK_ID else None)
 
     def _index(self, target: SyncTarget, listed: ListedFile, old: DocumentRow | None,
-               content_hash: str, extracted: Extracted) -> tuple[str, int]:
+               content_hash: str, extracted: Extracted) -> tuple[str, int] | None:
         assert self.config.chunk is not None
         text, chunks = chunk_units(extracted.units, self.config.chunk)
         doc_id = doc_id_for(target.source, listed.rel)
@@ -243,12 +279,10 @@ class _Run:
         rows = self._chunk_rows(doc_id, origin or listed.rel, chunks)
         self.report.tokens_estimated += sum(chunk.tokens for chunk in chunks)
         status = "updated" if old is not None else "added"
-        if old is not None:
-            self.report.counts.updated += 1
-        else:
-            self.report.counts.added += 1
-        self.report.chunks_written += len(rows)
+        document = self._row(target, listed, content_hash, "ok", None, extracted.title,
+                             extracted.pages)
         if self.report.dry_run or self.store is None:
+            self._count(status, len(rows))
             return status, len(rows)
 
         started = time.monotonic()
@@ -261,21 +295,73 @@ class _Run:
             if row.text_hash in known:
                 row.embedding = unpack_vector(known[row.text_hash])
         if needed:
-            assert self.embedder is not None
             texts = {r.text_hash: e for r, e in zip(rows, (c.embed_text() for c in chunks))}
-            vectors = self.embedder.embed([texts[r.text_hash] for r in needed], "document")
+            needed_texts = [texts[r.text_hash] for r in needed]
+            if self.pool is not None:
+                self.timings["embed"] += int((time.monotonic() - started) * 1000)
+                self._submit(_Pending(document, text, rows, status, len(needed)),
+                             needed, needed_texts)
+                return None
+            assert self.embedder is not None
+            vectors = self.embedder.embed(needed_texts, "document")
             for row, vector in zip(needed, vectors):
                 row.embedding = vector
-        self.report.chunks_embedded += len(needed)
-        self.report.chunks_reused += len(rows) - len(needed)
         self.timings["embed"] += int((time.monotonic() - started) * 1000)
-
-        started = time.monotonic()
-        document = self._row(target, listed, content_hash, "ok", None, extracted.title,
-                             extracted.pages)
-        self.store.write_document(document, text, rows)
-        self.timings["write"] += int((time.monotonic() - started) * 1000)
+        self._write(_Pending(document, text, rows, status, len(needed)))
         return status, len(rows)
+
+    def _write(self, pending: _Pending) -> None:
+        assert self.store is not None
+        started = time.monotonic()
+        self.store.write_document(pending.document, pending.text, pending.rows)
+        self.timings["write"] += int((time.monotonic() - started) * 1000)
+        self._count(pending.status, len(pending.rows))
+        self.report.chunks_embedded += pending.embedded
+        self.report.chunks_reused += len(pending.rows) - pending.embedded
+
+    def _count(self, status: str, chunks: int) -> None:
+        if status == "updated":
+            self.report.counts.updated += 1
+        else:
+            self.report.counts.added += 1
+        self.report.chunks_written += chunks
+
+    # --- embedding in worker processes (§3.11) --------------------------------------
+
+    def _submit(self, pending: _Pending, needed: list[ChunkRow], texts: list[str]) -> None:
+        """Send the document's chunks as requests of `batch_size` texts, waiting whenever
+        `parallelism` requests are already in flight."""
+        assert self.pool is not None and self.config.embedding is not None
+        size = self.config.embedding.batch_size
+        starts = range(0, len(needed), size)
+        pending.requests = len(starts)  # all of them, before any can come back
+        for start in starts:
+            while self.pool.in_flight >= self.pool.parallelism:
+                self._collect(block=True)
+            self.pool.submit(texts[start:start + size], (pending, needed[start:start + size]))
+        self._collect(block=False)
+
+    def _collect(self, *, block: bool) -> None:
+        """Take in the requests that have come back, and write each document whose
+        requests are all back."""
+        assert self.pool is not None
+        for (pending, rows), vectors, took_ms in self.pool.wait(block=block):
+            self.timings["embed"] += took_ms
+            if len(vectors) != len(rows):
+                raise EmbedderUnavailable(f"embedding endpoint returned {len(vectors)} "
+                                          f"vectors for {len(rows)} inputs")
+            for row, vector in zip(rows, vectors):
+                if self.dimensions is None:
+                    self.dimensions = len(vector)
+                elif len(vector) != self.dimensions:
+                    raise EmbedderUnavailable(f"embedding endpoint returned {len(vector)} "
+                                              f"dimensions, expected {self.dimensions}")
+                row.embedding = vector
+            pending.requests -= 1
+            if not pending.requests:
+                self._write(pending)
+                self._document_done(pending.document.source_id, pending.document.rel_path,
+                                    pending.status, len(pending.rows))
 
     def _chunk_rows(self, doc_id: str, searchable_path: str,
                     chunks: list[Chunk]) -> list[ChunkRow]:
@@ -317,12 +403,15 @@ class _Run:
 
 def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool = False,
             force: bool = False, only_stale: bool = False, embedder: Embedder | None = None,
-            progress: Progress | None = None, operation: str | None = None) -> SyncReport:
+            progress: Progress | None = None, operation: str | None = None,
+            embedding_parallelism: int | None = None) -> SyncReport:
     """Sync a kb. `only_stale` (for `kb reindex --refresh-stale-only`) re-processes only documents built
     by an older pipeline version: no new files, no removals. `operation` labels the run's
-    report when another command runs the sync (`kb ingest`)."""
+    report when another command runs the sync (`kb ingest`). `embedding_parallelism`
+    overrides the config's `embedding.parallelism` for this run."""
     config, targets, report = _prepare(home, kb_id, source, dry_run,
-                                       operation or ("reindex-stale" if only_stale else "sync"))
+                                       operation or ("reindex-stale" if only_stale else "sync"),
+                                       embedding_parallelism)
     kb_dir = home.kb_dir(kb_id)
     index_path = kb_dir / INDEX_FILE
     started = time.monotonic()
@@ -341,8 +430,12 @@ def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool 
         return _finish(report, started, kb_dir / "runs")
 
 
-def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool,
-             operation: str) -> tuple[KbConfig, list[SyncTarget], SyncReport]:
+def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool, operation: str,
+             embedding_parallelism: int | None = None,
+             ) -> tuple[KbConfig, list[SyncTarget], SyncReport]:
+    if embedding_parallelism is not None and embedding_parallelism < 1:
+        raise InvalidRequest("the embedding parallelism must be at least 1",
+                             {"embedding_parallelism": embedding_parallelism})
     config = home.load(kb_id)
     if config.kind == "remote":
         raise InvalidRequest(f"kb {kb_id!r} is remote: its sources are managed by its server",
@@ -350,7 +443,9 @@ def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool,
     assert config.embedding is not None
     report = SyncReport(kb=kb_id, operation=operation, dry_run=dry_run,  # type: ignore[arg-type]
                         started_at=_now(), profile=config.embedding.profile,
-                        pipeline_version=pipeline_version(config))
+                        pipeline_version=pipeline_version(config),
+                        embedding_parallelism=embedding_parallelism
+                        or config.embedding.parallelism)
     return config, sync_targets(home, config, source), report
 
 
@@ -373,9 +468,10 @@ def sync_into(home: Home, config: KbConfig, index_path: Path, report: SyncReport
             with store.db:
                 store.set_meta("generation", str(first_generation))
         _check_profile(store, report.profile, dimensions)
-        _execute(_Run(home, config, store, embedder, report, force, progress,
-                      only_stale=only_stale, donor=donor), targets, source)
-        dims = dimensions or getattr(embedder, "dimensions", None)
+        run = _Run(home, config, store, embedder, report, force, progress,
+                   only_stale=only_stale, donor=donor)
+        _execute(run, targets, source)
+        dims = dimensions or getattr(embedder, "dimensions", None) or run.dimensions
         if dims and store.meta("dimensions") is None:
             store.set_meta("dimensions", str(dims))
         store.set_meta("last_sync_at", _now())
@@ -422,6 +518,8 @@ def _execute(run: _Run, targets: list[SyncTarget], source: str | None) -> None:
     except KeyboardInterrupt:
         report.interrupted = True
     finally:
+        if run.pool is not None:
+            run.pool.close()  # requests still in flight are abandoned
         report.timings_ms = run.timings
 
 
