@@ -593,7 +593,8 @@ def _render_provider_list(result: ProviderList) -> str:
         head = f"{p.provider_id}  {p.title}\n  url {url}\n  key {key}\n  {p.data_terms}"
         rows = [[m.model_profile_id, m.model_canonical_name, m.dimensions,
                  m.max_input_tokens, m.marking_id,
-                 f"${m.price_per_mtok_usd}" if m.price_per_mtok_usd is not None else None]
+                 f"${m.price_per_mtok_usd:.2f}" if m.price_per_mtok_usd is not None
+                 else None]
                 for m in p.models]
         models = ("\n" + "\n".join("  " + line for line in table(
             ["MODEL", "CANONICAL NAME", "DIMS", "MAX TOKENS", "MARKING", "PER 1M"],

@@ -4,8 +4,9 @@
 # Fixed per provider: the URL (except oumigo and custom), the authentication, the dialect
 # and the request limits. Prices are USD per 1M input tokens.
 #
-# First wave (2026-11-16): oumigo, voyage_ai, openai, google_gemini, custom. Values marked
-# VERIFY are settled by live API calls before the entry is final (Appendix C).
+# First wave (2026-11-16): oumigo, voyage_ai, openai, google_gemini, custom. Second wave
+# (2026-11-17): cohere, mistral. Values marked VERIFY are settled by live API calls before
+# the entry is final (Appendix C).
 
 oumigo:
   title: OumiGo
@@ -133,6 +134,59 @@ google_gemini:  # live-tested 2026-11-16: gemini-embedding-2 at 3072 dimensions
         version: 1
         query: 'task: search result | query: {text}'
         document: 'title: none | text: {text}'
+
+cohere:
+  title: Cohere
+  base_url: https://api.cohere.com/v2
+  api_key_env: CO_API_KEY  # the variable Cohere's own SDK reads
+  key_required: true
+  dialect:
+    wire: cohere_v2  # the native API: its OpenAI-compatible one drops input_type
+    auth: bearer
+    marking: {kind: field, field: input_type, query: search_query, document: search_document}
+    dimensions_field: output_dimension
+  max_inputs: 96
+  data_terms: >-
+    Uses API data for training unless the organisation opts out in the dashboard; trial
+    keys are not for production (https://cohere.com/enterprise-data-commitments).
+  checked: '2026-11-17'
+  models:
+    embed-v5.0-pro:
+      canonical_name: '@cohere/embed-v5.0-pro'
+      compatibility_id: '@cohere/embed-v5.0-suite'
+      dimensions: 2048
+      allowed_dimensions: [256, 512, 768, 1024, 1536, 2048]
+      max_input_tokens: 128000
+    embed-v5.0-fast:
+      canonical_name: '@cohere/embed-v5.0-fast'
+      compatibility_id: '@cohere/embed-v5.0-suite'
+      dimensions: 2048
+      allowed_dimensions: [256, 512, 768, 1024, 1536, 2048]
+      max_input_tokens: 128000
+
+mistral:
+  title: Mistral AI
+  base_url: https://api.mistral.ai/v1
+  api_key_env: MISTRAL_API_KEY
+  key_required: true
+  dialect:
+    wire: openai
+    auth: bearer
+    marking: {kind: none}
+  # VERIFY: Mistral publishes no per-request limits for embeddings. Smart RAG's own bound
+  # on inputs; LangChain's Mistral client keeps a request under 16k tokens.
+  max_inputs: 2048
+  max_request_tokens: 16000
+  data_terms: >-
+    Training on API data depends on the plan: Scale is opted out by default, others can
+    opt out in the Admin Console (https://help.mistral.ai/en/articles/455207).
+  checked: '2026-11-17'
+  models:
+    mistral-embed:
+      canonical_name: '@mistralai/mistral-embed'
+      dimensions: 1024
+      max_input_tokens: 8192
+      price: 0.10
 
 custom:
   title: Custom OpenAI-compatible endpoint

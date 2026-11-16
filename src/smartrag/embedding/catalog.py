@@ -6,7 +6,7 @@ models. A model inherits its provider's dialect and may override the marking.
 
 A dialect is data in four parts, each from a fixed set:
 
-* `wire`: the request and response format; `openai` only, for now.
+* `wire`: the request and response format: `openai`, or Cohere's native `cohere_v2`.
 * `auth`: `bearer`, or `none`.
 * `marking`: how a query and a document are told apart: `none`; `field` (a request field
   with one value for each side); `prefix` (a template around the text for each side).
@@ -66,7 +66,7 @@ class Marking(_Strict):
 
 
 class Dialect(_Strict):
-    wire: Literal["openai"] = "openai"
+    wire: Literal["openai", "cohere_v2"] = "openai"
     auth: Literal["bearer", "none"] = "bearer"
     marking: Marking = Marking(kind="none")
     dimensions_field: Literal["dimensions", "output_dimension"] | None = None

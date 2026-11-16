@@ -1,7 +1,15 @@
 """Request and response formats. Only this part of a dialect is code (design memo §3.2).
 
-`openai`: `POST {base}/embeddings` with `{"model", "input": [...]}` plus the marking's and
-the dimensions' fields; the answer's `data[].embedding`, ordered by `index`.
+* `openai`: `POST {base}/embeddings` with `{"model", "input": [...]}` plus the marking's
+  and the dimensions' fields; the answer's `data[].embedding`, ordered by `index`.
+* `cohere_v2`: `POST {base}/embed` with `{"model", "texts": [...], "embedding_types":
+  ["float"], "truncate": "NONE"}` plus the marking's field (`input_type`, which Cohere
+  requires) and `output_dimension`; the answer's `embeddings.float`, in input order. Only
+  Cohere's native API marks queries and documents: its OpenAI-compatible one drops the
+  field. `truncate: NONE` makes an over-long input an error, as everywhere else in Smart
+  RAG, instead of Cohere's default of silently cutting its end.
+
+Both read errors from the usual shapes (`detail`, `error.message`, `message`).
 """
 
 from __future__ import annotations
@@ -17,50 +25,84 @@ MAX_DETAIL = 1000
 full sentences (Voyage's reduced-rate notice is about 400); an HTML error page is cut."""
 
 
+def _dimensions(spec: EmbeddingSpec, body: dict[str, Any]) -> dict[str, Any]:
+    if spec.request_dimensions is not None:
+        assert spec.dialect.dimensions_field is not None
+        body[spec.dialect.dimensions_field] = spec.request_dimensions
+    return body
+
+
+def _checked(vectors: Any, count: int) -> list[list[float]]:
+    if not isinstance(vectors, list) or len(vectors) != count:
+        got = len(vectors) if isinstance(vectors, list) else 0
+        raise EmbedderUnavailable(f"embedding endpoint returned {got} vectors for {count} "
+                                  "inputs")
+    checked: list[list[float]] = []
+    for vector in vectors:
+        if not isinstance(vector, list) or not vector:
+            raise EmbedderUnavailable("embedding endpoint returned an empty vector")
+        checked.append([float(x) for x in vector])
+    return checked
+
+
 class OpenAIWire:
     path = "/embeddings"
 
     @staticmethod
     def body(spec: EmbeddingSpec, texts: list[str], fields: dict[str, str]) -> dict[str, Any]:
-        body: dict[str, Any] = {"model": spec.model_profile_id, "input": texts, **fields}
-        if spec.request_dimensions is not None:
-            assert spec.dialect.dimensions_field is not None
-            body[spec.dialect.dimensions_field] = spec.request_dimensions
-        return body
+        return _dimensions(spec, {"model": spec.model_profile_id, "input": texts, **fields})
 
     @staticmethod
     def vectors(answer: Any, count: int) -> list[list[float]]:
         data = answer.get("data") if isinstance(answer, dict) else None
         if not isinstance(data, list):
             raise EmbedderUnavailable("the embedding endpoint's answer has no `data` list")
-        if len(data) != count:
-            raise EmbedderUnavailable(f"embedding endpoint returned {len(data)} vectors "
-                                      f"for {count} inputs")
         ordered = sorted(data, key=lambda item: item.get("index", 0)
                          if isinstance(item, dict) else 0)
-        vectors: list[list[float]] = []
-        for item in ordered:
-            vector = item.get("embedding") if isinstance(item, dict) else None
-            if not isinstance(vector, list) or not vector:
-                raise EmbedderUnavailable("embedding endpoint returned an empty vector")
-            vectors.append([float(x) for x in vector])
-        return vectors
+        return _checked([item.get("embedding") if isinstance(item, dict) else None
+                         for item in ordered], count)
 
     @staticmethod
     def error_detail(raw: str) -> str:
-        """The server's own message, from the usual error shapes."""
-        try:
-            body = json.loads(raw)
-        except ValueError:
-            return raw.strip()[:MAX_DETAIL]
-        if isinstance(body, list) and body and isinstance(body[0], dict):
-            body = body[0]  # Google's compatible endpoint wraps the error in a list
-        if isinstance(body, dict):
-            detail = body.get("detail") or body.get("error") or body.get("message") or body
-            if isinstance(detail, dict):
-                detail = detail.get("message") or detail
-            return str(detail)[:MAX_DETAIL]
-        return raw[:MAX_DETAIL]
+        return error_detail(raw)
 
 
-WIRES = {"openai": OpenAIWire}
+class CohereV2Wire:
+    path = "/embed"
+
+    @staticmethod
+    def body(spec: EmbeddingSpec, texts: list[str], fields: dict[str, str]) -> dict[str, Any]:
+        return _dimensions(spec, {"model": spec.model_profile_id, "texts": texts,
+                                  "embedding_types": ["float"], "truncate": "NONE", **fields})
+
+    @staticmethod
+    def vectors(answer: Any, count: int) -> list[list[float]]:
+        embeddings = answer.get("embeddings") if isinstance(answer, dict) else None
+        if not isinstance(embeddings, dict) or "float" not in embeddings:
+            raise EmbedderUnavailable("the embedding endpoint's answer has no "
+                                      "`embeddings.float` list")
+        return _checked(embeddings["float"], count)
+
+    @staticmethod
+    def error_detail(raw: str) -> str:
+        return error_detail(raw)
+
+
+def error_detail(raw: str) -> str:
+    """The server's own message, from the usual error shapes."""
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return raw.strip()[:MAX_DETAIL]
+    if isinstance(body, list) and body and isinstance(body[0], dict):
+        body = body[0]  # Google's compatible endpoint wraps the error in a list
+    if isinstance(body, dict):
+        detail = body.get("detail") or body.get("error") or body.get("message") or body
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail
+        return str(detail)[:MAX_DETAIL]
+    return raw[:MAX_DETAIL]
+
+
+WIRES: dict[str, type[OpenAIWire | CohereV2Wire]] = {
+    "openai": OpenAIWire, "cohere_v2": CohereV2Wire}

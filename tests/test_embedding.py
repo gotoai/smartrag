@@ -12,7 +12,8 @@ import pytest
 from smartrag.embedding import transport
 from smartrag.embedding.api import open_embedder, resolve
 from smartrag.embedding.catalog import catalog, provider_list
-from smartrag.embedding.wire import OpenAIWire
+from smartrag.embedding.engine import HttpEmbedder
+from smartrag.embedding.wire import CohereV2Wire, OpenAIWire
 from smartrag.errors import ConfigError, EmbedderUnavailable
 from smartrag.kb.config import EmbeddingConfig, KbConfig
 
@@ -58,6 +59,10 @@ def endpoint():
                          else None)
                 self._reply(status, {"error": {"message": f"status {status}"}}, extra)
                 return
+            if self.path.endswith("/embed"):  # Cohere's native API
+                self._reply(200, {"id": "e", "embeddings": {"float": [
+                    [float(len(t))] + [1.0] * (state["dims"] - 1) for t in body["texts"]]}})
+                return
             texts = body["input"]
             if state["max_inputs"] and len(texts) > state["max_inputs"]:
                 self._reply(429, {"detail": "too many tokens per minute"},
@@ -91,7 +96,8 @@ def _custom(url: str, **extra) -> EmbeddingConfig:
 
 def test_the_first_wave_is_in_the_catalog():
     providers = catalog()
-    assert {"oumigo", "voyage_ai", "openai", "google_gemini", "custom"} <= set(providers)
+    assert set(providers) == {"oumigo", "voyage_ai", "openai", "google_gemini", "cohere",
+                              "mistral", "custom"}
     assert set(providers["oumigo"].models) == {
         "ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k", "harrier-oss-v1-0.6b@32k"}
     listed = {p.provider_id: p for p in provider_list().providers}
@@ -289,6 +295,47 @@ def test_a_request_refused_for_a_minute_is_split_and_later_batches_stay_small(
     sent = len(bodies)
     embedder.embed(["f", "g"], "document")
     assert [len(b["input"]) for b in bodies[sent:]] == [1, 1]
+
+
+# --- the second wave: Cohere's native API, Mistral -----------------------------------
+
+
+def test_cohere_marks_queries_and_documents_on_its_native_api(endpoint):
+    url, _seen, bodies, state = endpoint
+    state["dims"] = 512
+    spec = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-fast",
+                                   dimensions=512))
+    assert spec.base_url == "https://api.cohere.com/v2" and spec.api_key == "${CO_API_KEY}"
+    embedder = HttpEmbedder(dataclasses.replace(spec, base_url=url),
+                            environ={"CO_API_KEY": "k"})
+    assert embedder.url.endswith("/v1/embed")
+    vectors = embedder.embed(["相続", "税"], "query")
+    assert [v[0] for v in vectors] == [2.0, 1.0] and len(vectors[0]) == 512
+    embedder.embed(["相続"], "document")
+    assert bodies[0] == {"model": "embed-v5.0-fast", "texts": ["相続", "税"],
+                         "embedding_types": ["float"], "truncate": "NONE",
+                         "input_type": "search_query", "output_dimension": 512}
+    assert bodies[1]["input_type"] == "search_document"
+
+
+def test_cohere_pro_and_fast_share_a_space_and_mistral_marks_nothing():
+    pro = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro"))
+    fast = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-fast"))
+    assert pro.space == fast.space
+    assert pro.space.key == "@cohere/embed-v5.0-suite|2048|field:input_type"
+    mistral = resolve(EmbeddingConfig(provider_id="mistral", model_profile_id="mistral-embed"))
+    assert mistral.space.key == "@mistralai/mistral-embed|1024|none"
+    with pytest.raises(ValueError, match="over provider 'cohere'"):
+        EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro", batch_size=97)
+    with pytest.raises(ValueError, match="cannot return 300"):
+        EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro", dimensions=300)
+
+
+def test_a_cohere_answer_without_float_vectors_is_an_error():
+    with pytest.raises(EmbedderUnavailable, match="embeddings.float"):
+        CohereV2Wire.vectors({"embeddings": {"int8": [[1]]}}, 1)
+    with pytest.raises(EmbedderUnavailable, match="returned 1 vectors for 2"):
+        CohereV2Wire.vectors({"embeddings": {"float": [[0.1]]}}, 2)
 
 
 # --- credentials ----------------------------------------------------------------------

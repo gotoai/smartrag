@@ -87,7 +87,7 @@ them become one block, and multi-row headers become a header plus data rows.
 ## Embedding providers
 
 A kb picks a provider and one of its models from the catalog (`provider list`,
-`src/smartrag/embedding/providers.yaml`); everything else comes from the catalog. First wave:
+`src/smartrag/embedding/providers.yaml`); everything else comes from the catalog:
 
 | `provider_id` | Models | URL | Key |
 |---|---|---|---|
@@ -95,6 +95,8 @@ A kb picks a provider and one of its models from the catalog (`provider list`,
 | `voyage_ai` | `voyage-4`, `voyage-4-lite`, `voyage-4-large` | fixed | `${VOYAGE_API_KEY}` |
 | `openai` | `text-embedding-3-small`, `text-embedding-3-large` | fixed | `${OPENAI_API_KEY}` |
 | `google_gemini` | `gemini-embedding-2` | fixed | `${GEMINI_API_KEY}` |
+| `cohere` | `embed-v5.0-pro`, `embed-v5.0-fast` (one vector space) | fixed | `${CO_API_KEY}` |
+| `mistral` | `mistral-embed` | fixed | `${MISTRAL_API_KEY}` |
 | `custom` | any OpenAI-compatible endpoint, described in the config | `${SMARTRAG_EMBED_BASE_URL}` | `${SMARTRAG_EMBED_API_KEY}` |
 
 ```yaml
