@@ -1,7 +1,7 @@
 """Which kbs an agent sees, and what `describe_sources` tells it (design memo §3.9).
 
-An agent sees only usable kbs: local, indexed with at least one document, built with
-the embedding profile its config names, and described. Managing kbs is not the agent's
+An agent sees only usable kbs: local, indexed with at least one document, in the
+vector space its config's model gives, and described. Managing kbs is not the agent's
 job, so an unfinished or broken kb is simply absent. A kb being synced is still usable;
 so is one whose embedding endpoint is down (search falls back to keywords).
 
@@ -23,6 +23,7 @@ from smartrag.agent.models import (
     KbDescription,
     SourceSummary,
 )
+from smartrag.embedding.resolve import resolve
 from smartrag.errors import NotFound
 from smartrag.index import SqliteIndex
 from smartrag.kb.config import MAX_DESCRIPTION, AgentConfig
@@ -103,14 +104,15 @@ class AgentCatalog:
                 return None
             store = SqliteIndex.open(path, readonly=True)
             try:
-                held = store.meta("embedding_profile")
+                held = store.meta("vector_space")
                 has_documents = store.db.execute(
                     "SELECT EXISTS (SELECT 1 FROM documents WHERE status = 'ok')").fetchone()[0]
             finally:
                 store.close()
         except Exception:  # noqa: BLE001 - a kb that cannot be read is not usable: hide it
             return None
-        if not has_documents or (held is not None and held != config.embedding.profile):
+        if not has_documents or (held is not None
+                                 and held != resolve(config.embedding).space.key):
             return None
         return AgentKb(kb_id=kb_id, description=description)
 

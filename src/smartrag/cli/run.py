@@ -24,6 +24,7 @@ import typer
 from smartrag.cli.output import (
     OutputFormat,
     RunState,
+    TrueFalse,
     bullets,
     confirm,
     emit_error,
@@ -32,9 +33,10 @@ from smartrag.cli.output import (
     table,
 )
 from smartrag.cli.progress import ProgressBar, progress_lines
+from smartrag.embedding.catalog import ProviderList, provider_list
 from smartrag.errors import NotFound, SmartRAGError
 from smartrag.kb import Home, add_source, list_sources, remove_source, resolve_home, test_source
-from smartrag.kb.config import CONFIG_FILE, DEFAULT_PROFILE
+from smartrag.kb.config import CONFIG_FILE, DEFAULT_MODEL, DEFAULT_PROVIDER
 from smartrag.kb.ingest import IngestReport, ingest_files
 from smartrag.kb.manifest import apply_manifest, clear_manifest
 from smartrag.kb.models import (
@@ -43,6 +45,7 @@ from smartrag.kb.models import (
     KbRemoved,
     KbStatus,
     KbUpdated,
+    KbVerified,
     ManifestApplied,
     SourceAdded,
     SourceList,
@@ -66,8 +69,11 @@ kb_app = typer.Typer(help="Knowledge bases: list, create, inspect, remove.",
                      no_args_is_help=True)
 source_app = typer.Typer(help="A kb's sources: the folders `sync` follows.",
                          no_args_is_help=True)
+provider_app = typer.Typer(help="Embedding providers and their models (the catalog).",
+                           no_args_is_help=True)
 run_app.add_typer(kb_app, name="kb")
 run_app.add_typer(source_app, name="source")
+run_app.add_typer(provider_app, name="provider")
 
 
 @run_app.callback()
@@ -105,8 +111,10 @@ def kb_new(
     title: str = typer.Option(None, "--title", help="Display name [default: the id]."),
     description: str = typer.Option("", "--description",
                                     help="What the kb contains; agents choose kbs by it."),
-    profile: str = typer.Option(DEFAULT_PROFILE, "--profile",
-                                help="Embedding profile id (local kb)."),
+    provider: str = typer.Option(DEFAULT_PROVIDER, "--provider",
+                                 help="Embedding provider (local kb); see `provider list`."),
+    model: str = typer.Option(DEFAULT_MODEL, "--model",
+                              help="The provider's model profile id (local kb)."),
     remote: str = typer.Option(None, "--remote",
                                help="Make a remote kb: the https:// URL of its Smart RAG server."),
     remote_kb: str = typer.Option(None, "--remote-kb",
@@ -117,7 +125,8 @@ def kb_new(
     """Create a kb: its folder and config.yaml."""
     state = _state(ctx)
     invoke(state, lambda: state.home.new(kb, title=title, description=description,
-                                         profile=profile, remote=remote, remote_kb=remote_kb,
+                                         provider_id=provider, model_profile_id=model,
+                                         remote=remote, remote_kb=remote_kb,
                                          token_env=token_env),
            _render_kb_created)
 
@@ -136,6 +145,14 @@ def kb_set(
     if description is None:
         raise typer.BadParameter("nothing to set: give --description", param_hint="--description")
     invoke(state, lambda: state.home.set(kb, description=description), _render_kb_updated)
+
+
+@kb_app.command("verify")
+def kb_verify(ctx: typer.Context, kb: str = typer.Option(..., "--kb", help="The kb's id.")) -> None:
+    """Check a kb's embedding provider with one short test embedding: the URL, the key,
+    the model and the vector size. Sends a few tokens to the provider."""
+    state = _state(ctx)
+    invoke(state, lambda: state.home.verify(kb), _render_kb_verified)
 
 
 @kb_app.command("status")
@@ -176,15 +193,21 @@ def kb_sync(
     force: bool = typer.Option(False, "--force",
                                help="Re-extract files even if unchanged. Unchanged chunks "
                                     "keep their vectors."),
-    exit_with_parent: bool = typer.Option(
-        False, "--exit-with-parent",
-        help="Stop cleanly when stdin closes: how a parent app (Kari) says it has gone."),
+    exit_with_parent: TrueFalse = typer.Option(
+        TrueFalse.false, "--exit-with-parent", case_sensitive=False,
+        help="true: stop cleanly when stdin closes, which is how a parent app (Kari) says "
+             "it has gone."),
     refresh: float = typer.Option(1.0, "--refresh", min=0.1, metavar="SECONDS",
                                   help="How often the progress bar is redrawn."),
     embedding_parallelism: int = typer.Option(
         None, "--embedding-parallelism", min=1, metavar="N",
         help="Embedding requests in flight at once, each in a worker process; raise it for "
              "a remote endpoint [default: the kb's embedding.parallelism]."),
+    adapt_to_rate_limit: TrueFalse = typer.Option(
+        TrueFalse.true, "--adapt-to-rate-limit", case_sensitive=False,
+        help="true: wait out the provider's rate limits (429, or 503 while a model starts): "
+             "back off, honour Retry-After, split requests too big for a per-minute limit, "
+             "keep fewer in flight. false: stop at the first one."),
 ) -> None:
     """Bring the kb's index in line with its sources.
 
@@ -196,7 +219,8 @@ def kb_sync(
     try:
         with _progress(state, refresh) as progress:
             report = sync_kb(state.home, kb, source=source, dry_run=dry_run, force=force,
-                             progress=progress, embedding_parallelism=embedding_parallelism)
+                             progress=progress, embedding_parallelism=embedding_parallelism,
+                             adapt_to_rate_limit=bool(adapt_to_rate_limit))
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -225,18 +249,25 @@ def _print_report(state: RunState, report: SyncReport | IngestReport,
 @kb_app.command("ingest")
 def kb_ingest(
     ctx: typer.Context,
-    paths: list[str] = typer.Argument(..., help="Files, or folders with --recursive."),
+    paths: list[str] = typer.Argument(..., help="Files, or folders with --recursive=true."),
     kb: str = typer.Option(..., "--kb", help="The kb's id."),
-    recursive: bool = typer.Option(False, "--recursive", "-r",
-                                   help="Ingest the files inside the folders named."),
+    recursive: TrueFalse = typer.Option(TrueFalse.false, "--recursive", case_sensitive=False,
+                                        help="true: ingest the files inside the folders "
+                                             "named."),
     dry_run: bool = typer.Option(False, "--dry-run",
                                  help="Report what would be copied and embedded; copy nothing."),
-    exit_with_parent: bool = typer.Option(False, "--exit-with-parent",
-                                          help="Stop cleanly when stdin closes."),
+    exit_with_parent: TrueFalse = typer.Option(TrueFalse.false, "--exit-with-parent",
+                                               case_sensitive=False,
+                                               help="true: stop cleanly when stdin closes."),
     embedding_parallelism: int = typer.Option(
         None, "--embedding-parallelism", min=1, metavar="N",
         help="Embedding requests in flight at once, each in a worker process; raise it for "
              "a remote endpoint [default: the kb's embedding.parallelism]."),
+    adapt_to_rate_limit: TrueFalse = typer.Option(
+        TrueFalse.true, "--adapt-to-rate-limit", case_sensitive=False,
+        help="true: wait out the provider's rate limits (429, or 503 while a model starts): "
+             "back off, honour Retry-After, split requests too big for a per-minute limit, "
+             "keep fewer in flight. false: stop at the first one."),
 ) -> None:
     """Copy files into the kb's sink and index them. The copies are snapshots: later
     changes to the originals are not picked up (use `source add` to follow a folder).
@@ -247,9 +278,11 @@ def kb_ingest(
         _stop_when_stdin_closes()
     try:
         with _progress(state) as progress:
-            report = ingest_files(state.home, kb, paths, recursive=recursive, dry_run=dry_run,
+            report = ingest_files(state.home, kb, paths, recursive=bool(recursive),
+                                  dry_run=dry_run,
                                   progress=progress,
-                                  embedding_parallelism=embedding_parallelism)
+                                  embedding_parallelism=embedding_parallelism,
+                                  adapt_to_rate_limit=bool(adapt_to_rate_limit))
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -271,12 +304,18 @@ def kb_reindex(
                                       "Also how a kb changes its embedding model."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report the work; change nothing."),
     yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation (--rebuild)."),
-    exit_with_parent: bool = typer.Option(False, "--exit-with-parent",
-                                          help="Stop cleanly when stdin closes."),
+    exit_with_parent: TrueFalse = typer.Option(TrueFalse.false, "--exit-with-parent",
+                                               case_sensitive=False,
+                                               help="true: stop cleanly when stdin closes."),
     embedding_parallelism: int = typer.Option(
         None, "--embedding-parallelism", min=1, metavar="N",
         help="Embedding requests in flight at once, each in a worker process; raise it for "
              "a remote endpoint [default: the kb's embedding.parallelism]."),
+    adapt_to_rate_limit: TrueFalse = typer.Option(
+        TrueFalse.true, "--adapt-to-rate-limit", case_sensitive=False,
+        help="true: wait out the provider's rate limits (429, or 503 while a model starts): "
+             "back off, honour Retry-After, split requests too big for a per-minute limit, "
+             "keep fewer in flight. false: stop at the first one."),
 ) -> None:
     """Re-process stale documents, or rebuild the index. Give exactly one of --refresh-stale-only and
     --rebuild. Exit codes as `kb sync`."""
@@ -289,15 +328,18 @@ def kb_reindex(
     try:
         if not refresh_stale_only and not dry_run:
             confirm(state, yes, f"Rebuild the index of kb {kb!r}? Every file is read and "
-                                "processed again; vectors are reused where the embedding "
-                                "profile is unchanged. Search keeps working meanwhile.")
+                                "processed again (a stopped rebuild is continued); vectors "
+                                "are reused where the vector space is unchanged. Search "
+                                "keeps working meanwhile.")
         with _progress(state) as progress:
             if refresh_stale_only:
                 report = reindex_stale(state.home, kb, dry_run=dry_run, progress=progress,
-                                       embedding_parallelism=embedding_parallelism)
+                                       embedding_parallelism=embedding_parallelism,
+                                       adapt_to_rate_limit=bool(adapt_to_rate_limit))
             else:
                 report = reindex_rebuild(state.home, kb, dry_run=dry_run, progress=progress,
-                                         embedding_parallelism=embedding_parallelism)
+                                         embedding_parallelism=embedding_parallelism,
+                                         adapt_to_rate_limit=bool(adapt_to_rate_limit))
     except SmartRAGError as err:
         emit_error(state.format, err)
         raise typer.Exit(1) from None
@@ -449,17 +491,18 @@ def source_add(
                                            "Repeatable."),
     exclude: list[str] = typer.Option(None, "--exclude",
                                       help="Skip files matching this glob. Repeatable."),
-    recursive: bool = typer.Option(True, "--recursive/--no-recursive",
-                                   help="Include subfolders."),
-    allow_missing: bool = typer.Option(False, "--allow-missing",
-                                       help="Accept a path that does not exist now "
-                                            "(e.g. a share that is not mounted)."),
+    recursive: TrueFalse = typer.Option(TrueFalse.true, "--recursive", case_sensitive=False,
+                                        help="Include subfolders."),
+    allow_missing: TrueFalse = typer.Option(TrueFalse.false, "--allow-missing",
+                                            case_sensitive=False,
+                                            help="true: accept a path that does not exist now "
+                                                 "(e.g. a share that is not mounted)."),
 ) -> None:
     """Register a folder (or file) that `sync` will follow. Nothing is copied."""
     state = _state(ctx)
-    invoke(state, lambda: add_source(state.home, kb, source, location, recursive=recursive,
-                                     include=include or [], exclude=exclude or [],
-                                     allow_missing=allow_missing),
+    invoke(state, lambda: add_source(state.home, kb, source, location,
+                                     recursive=bool(recursive), include=include or [],
+                                     exclude=exclude or [], allow_missing=bool(allow_missing)),
            _render_source_added)
 
 
@@ -532,6 +575,38 @@ def source_test(
 # --- text rendering ------------------------------------------------------------------
 
 
+# --- provider ----------------------------------------------------------------------
+
+
+@provider_app.command("list")
+def provider_list_command(ctx: typer.Context) -> None:
+    """List the embedding providers and models a kb can use. Makes no network calls."""
+    state = _state(ctx)
+    invoke(state, provider_list, _render_provider_list)
+
+
+def _render_provider_list(result: ProviderList) -> str:
+    blocks = []
+    for p in result.providers:
+        url = p.base_url or f"${{{p.base_url_env}}}"
+        key = f"${{{p.api_key_env}}}" if p.api_key_env else "-"
+        head = f"{p.provider_id}  {p.title}\n  url {url}\n  key {key}\n  {p.data_terms}"
+        rows = [[m.model_profile_id, m.model_canonical_name, m.dimensions,
+                 m.max_input_tokens, m.marking_id,
+                 f"${m.price_per_mtok_usd}" if m.price_per_mtok_usd is not None else None]
+                for m in p.models]
+        models = ("\n" + "\n".join("  " + line for line in table(
+            ["MODEL", "CANONICAL NAME", "DIMS", "MAX TOKENS", "MARKING", "PER 1M"],
+            rows).splitlines())) if rows else "\n  (the kb's config states the model)"
+        blocks.append(head + models)
+    return "\n\n".join(blocks)
+
+
+def _render_kb_verified(result: KbVerified) -> str:
+    return (f"kb {result.kb!r}: {result.provider_id} / {result.model_profile_id} answered "
+            f"in {result.took_ms} ms\nspace {result.vector_space}\nurl   {result.url}")
+
+
 def _render_kb_list(result: KbList) -> str:
     if not result.kbs:
         where = result.home if result.home_exists else f"{result.home} (does not exist yet)"
@@ -574,7 +649,9 @@ def _render_kb_status(result: KbStatus) -> str:
     else:
         index = result.index
         rows += [
-            ["profile", result.embedding_profile],
+            ["provider", result.embedding.provider_id if result.embedding else None],
+            ["model", result.embedding.model_profile_id if result.embedding else None],
+            ["space", result.embedding.vector_space if result.embedding else None],
             ["sources", result.sources],
             ["sink", f"{result.sink_files or 0} files, {human_bytes(result.sink_bytes or 0)}"],
             ["index", _index_line(index)],
@@ -642,6 +719,14 @@ def _render_sync(r: SyncReport) -> str:
     lines.append("time       " + ", ".join(f"{k} {v / 1000:.1f} s" for k, v in t.items())
                  + (f" (embed summed over up to {r.embedding_parallelism} requests in flight)"
                     if r.embedding_parallelism > 1 and not r.dry_run else ""))
+    if r.resumed_documents:
+        lines.append(f"resumed    {r.resumed_documents} documents done by the stopped rebuild "
+                     "were kept")
+    if r.rate_limit_waits:
+        lines.append(f"rate limit {r.rate_limit_waits} waits, "
+                     f"{r.rate_limit_wait_ms / 1000:.0f} s in all"
+                     + (" (summed over the requests in flight)"
+                        if r.embedding_parallelism > 1 else ""))
     for s in r.sources:
         state = "" if s.complete else " (incomplete listing)"
         note = f": {s.note}" if s.note else ""

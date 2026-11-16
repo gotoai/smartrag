@@ -101,7 +101,7 @@ def test_source_commands(run, tmp_path):
 def test_source_test_exit_code_reflects_an_unreadable_root(run, tmp_path):
     run("kb", "new", "--kb", "legal")
     run("source", "add", "--kb", "legal", "--source", "nas", str(tmp_path / "gone"),
-        "--allow-missing")
+        "--allow-missing=true")
     result = run("source", "test", "--kb", "legal", "--source", "nas")
     assert result.exit_code == 1 and _json(result)["ok"] is False
 

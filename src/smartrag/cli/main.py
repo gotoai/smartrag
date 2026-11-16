@@ -19,6 +19,7 @@ from pathlib import Path
 import typer
 
 from smartrag.__about__ import __version__
+from smartrag.cli.output import TrueFalse
 from smartrag.cli.run import run_app
 
 app = typer.Typer(help="Smart RAG: a knowledge source any agent can use.",
@@ -41,8 +42,11 @@ def serve(
     port: int = typer.Option(None, help="Port [default: $SMARTRAG_PORT or 8710]"),
     api_keys_file: Path = typer.Option(None, help="Hashed API key file "
                                                   "[default: $SMARTRAG_API_KEYS_FILE]"),
-    demo: bool = typer.Option(False, help="Serve the built-in in-memory demo corpus."),
-    no_auth: bool = typer.Option(False, help="Disable API keys (loopback only, development)."),
+    demo: TrueFalse = typer.Option(TrueFalse.false, "--demo", case_sensitive=False,
+                                   help="true: serve the built-in in-memory demo corpus."),
+    auth: TrueFalse = typer.Option(TrueFalse.true, "--auth", case_sensitive=False,
+                                   help="false: accept requests without API keys (loopback "
+                                        "only, development)."),
     log_level: str = typer.Option("info"),
 ) -> None:
     """Run the query-plane Web API."""
@@ -54,15 +58,16 @@ def serve(
 
     overrides = {k: v for k, v in {"host": host, "port": port,
                                    "api_keys_file": api_keys_file}.items() if v is not None}
-    if no_auth:
+    if not auth:
         overrides["auth_disabled"] = True
     settings = Settings(**overrides)
     if settings.auth_disabled and not _is_loopback(settings.host):
-        raise typer.BadParameter(f"--no-auth is only allowed on a loopback address, not "
-                                 f"{settings.host}", param_hint="--no-auth")
+        raise typer.BadParameter(f"--auth=false is only allowed on a loopback address, not "
+                                 f"{settings.host}", param_hint="--auth")
     if not demo:
         # TODO: build the PostgreSQL engine from settings once the index exists.
-        typer.echo("smartrag: no index backend is implemented yet; run with --demo", err=True)
+        typer.echo("smartrag: no index backend is implemented yet; run with --demo=true",
+                   err=True)
         raise typer.Exit(2)
 
     logging.basicConfig(level=log_level.upper(),

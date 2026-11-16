@@ -27,14 +27,9 @@ ALPHABET = "相続税評価更正処分電子申告義務消費年休規程賃�
 class CharEmbedder:
     """Vectors from character counts: texts sharing words with the query score higher."""
 
-    profile = "ruri-v3-310m@8k"
-
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.calls: list[str] = []
-
-    def check(self) -> int:
-        return len(ALPHABET) + 1
 
     def embed(self, texts, input_type):
         self.calls.append(input_type)

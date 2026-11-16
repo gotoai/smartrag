@@ -12,8 +12,10 @@ would promise far too early a finish. A rate needs at least 10 finished files, s
 files are slow the window reaches back further. Until 30 s have passed and 10 files are
 done, the estimate shows `--:--:--` rather than a guess.
 
-Not on a terminal (a log file, a pipe), a bar redrawn with carriage returns is noise, so
-each processed document gets its own line instead. Problems are not printed as they
+While a rate limit is being waited out, the line ends with the wait counting down
+(`rate limited, retrying in 37 s`). Not on a terminal (a log file, a pipe), a bar redrawn
+with carriage returns is noise, so each processed document, and each wait, gets its own
+line instead. Problems are not printed as they
 happen in either form: the report at the end lists them.
 """
 
@@ -42,10 +44,12 @@ def clock(seconds: float) -> str:
     return f"{whole // 3600:02d}:{whole % 3600 // 60:02d}:{whole % 60:02d}"
 
 
-def render(done: int, total: int, elapsed: float, remaining: float | None, columns: int) -> str:
+def render(done: int, total: int, elapsed: float, remaining: float | None, columns: int,
+           waiting: float | None = None) -> str:
     fraction = done / total if total else 1.0
     tail = (f"  {fraction * 100:5.1f}%  {done} / {total}  {clock(elapsed)} / "
-            + ("--:--:--" if remaining is None else clock(remaining)))
+            + ("--:--:--" if remaining is None else clock(remaining))
+            + (f"  rate limited, retrying in {waiting:.0f} s" if waiting is not None else ""))
     width = max(_BAR_MIN, min(_BAR_MAX, columns - len(tail) - 3))
     filled = int(width * fraction)
     return f"[{'#' * filled}{'-' * (width - filled)}]{tail}"
@@ -69,6 +73,7 @@ class ProgressBar:
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self._drawn = 0
+        self._wait_until = 0.0
 
     def __call__(self, event: dict[str, object]) -> None:
         kind = event.get("event")
@@ -85,6 +90,11 @@ class ProgressBar:
         elif kind == "document":
             with self._lock:
                 self.done += 1
+        elif kind == "wait":
+            with self._lock:
+                until = time.monotonic() + float(event["seconds"])  # type: ignore[arg-type]
+                self._wait_until = max(self._wait_until, until)
+                self._draw()
 
     def _tick(self) -> None:
         while not self._stop.wait(self.interval):
@@ -123,7 +133,9 @@ class ProgressBar:
         now = time.monotonic()
         self._samples.append((now, self.done))
         columns = shutil.get_terminal_size().columns
-        line = render(self.done, self.total, now - self.started, self.remaining(now), columns)
+        waiting = self._wait_until - now if self._wait_until > now else None
+        line = render(self.done, self.total, now - self.started, self.remaining(now), columns,
+                      waiting)
         # Pad over the previous line instead of an ANSI erase, which old Windows
         # consoles print literally.
         self.stream.write("\r" + line + " " * max(0, self._drawn - len(line)))
@@ -158,3 +170,6 @@ def progress_lines(event: dict[str, object]) -> None:
                    err=True)
     elif event.get("event") == "source":
         typer.echo(f"source {event['source']}: {event['files']} files", err=True)
+    elif event.get("event") == "wait":
+        typer.echo(f"rate limited ({event['kind']}): retrying in {event['seconds']:.0f} s",
+                   err=True)

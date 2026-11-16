@@ -4,7 +4,7 @@ One file, WAL mode, one writer (the sync, under the kb lock), any number of read
 
 | Table | Holds |
 |---|---|
-| `meta` | schema version, the embedding profile and dimensions every vector came from |
+| `meta` | schema version; the vector space every vector belongs to, with the provider and model that filled it |
 | `documents` | one row per file seen: ok, skipped or failed, with the reason; skipped and failed files are not retried until they change |
 | `contents` | each distinct extracted text once, keyed by the file's hash and the pipeline version that read it (identical files share it; a new extractor gets its own) |
 | `chunks` | spans of a document's text, their heading path and location, and their vector |
@@ -14,6 +14,11 @@ One file, WAL mode, one writer (the sync, under the kb lock), any number of read
 
 Vectors are float32 BLOBs. A chunk whose embedded text is unchanged keeps its vector
 across re-syncs (`vectors_for`), so editing one paragraph re-embeds one or two chunks.
+Chunks are keyed on the vector space (design memo §3.2), not on the model profile: moving
+to another profile in the same space keeps every vector.
+
+Schema 2 (2026-11-16) replaced the profile with the vector space. An index of schema 1 is
+not migrated: `kb reindex --rebuild` builds a new one beside it.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from pydantic import BaseModel
 
 from smartrag.errors import ConfigError
 
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -74,11 +79,11 @@ CREATE TABLE IF NOT EXISTS chunks (
     location     TEXT,
     tokens       INTEGER NOT NULL,
     text_hash    TEXT NOT NULL,
-    profile      TEXT NOT NULL,
+    vector_space TEXT NOT NULL,
     embedding    BLOB
 );
 CREATE INDEX IF NOT EXISTS chunks_doc ON chunks (doc_id, ordinal);
-CREATE INDEX IF NOT EXISTS chunks_text_hash ON chunks (text_hash, profile);
+CREATE INDEX IF NOT EXISTS chunks_text_hash ON chunks (text_hash, vector_space);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     heading, body, path,
     content = '', contentless_delete = 1,
@@ -134,7 +139,7 @@ class ChunkRow:
     location: str | None
     tokens: int
     text_hash: str
-    profile: str
+    vector_space: str
     embedding: Sequence[float] | None
     fts_heading: str
     fts_body: str
@@ -157,7 +162,7 @@ class IndexStats(BaseModel):
     failed: int
     chunks: int
     embedded: int
-    profile: str | None
+    vector_space: str | None
     dimensions: int | None
     last_indexed_at: str | None
 
@@ -173,6 +178,23 @@ def _add_missing_columns(connection: sqlite3.Connection) -> None:
             if name not in present:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
     connection.commit()
+
+
+def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
+    """Refuse an index of another schema, with what to do about it."""
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND "
+                          "name = 'meta'").fetchone() is None:
+        return  # a new database
+    row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if row is None or int(row[0]) == INDEX_SCHEMA_VERSION:
+        return
+    connection.close()
+    if int(row[0]) < INDEX_SCHEMA_VERSION:
+        raise ConfigError(f"{path} was built by an older smartrag (index schema {row[0]}); "
+                          "rebuild it with `smartrag run kb reindex --kb <id> --rebuild`",
+                          {"schema": int(row[0])})
+    raise ConfigError(f"{path} has index schema {row[0]}; this smartrag reads "
+                      f"{INDEX_SCHEMA_VERSION}", {"schema": int(row[0])})
 
 
 def pack_vector(vector: Sequence[float]) -> bytes:
@@ -191,7 +213,10 @@ class SqliteIndex:
         self.path = path
 
     @classmethod
-    def open(cls, path: Path, *, readonly: bool = False) -> SqliteIndex:
+    def open(cls, path: Path, *, readonly: bool = False,
+             any_schema: bool = False) -> SqliteIndex:
+        """`any_schema` (read-only) opens an index of an older schema, as a rebuild does to
+        carry its manifests over; anything else refuses it."""
         if readonly:
             # Not `mode=ro`: a read-only connection to a WAL database cannot start when the
             # `-shm` file is absent, which is the normal state after the last writer closed.
@@ -203,19 +228,17 @@ class SqliteIndex:
             connection = sqlite3.connect(path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        if not any_schema:
+            _check_schema(connection, path)
         if not readonly:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(_SCHEMA)
             _add_missing_columns(connection)
             path.chmod(0o600)  # the index holds the full extracted text of the documents
             index = cls(connection, path)
-            version = index.meta("schema_version")
-            if version is None:
+            if index.meta("schema_version") is None:
                 index.set_meta("schema_version", str(INDEX_SCHEMA_VERSION))
                 connection.commit()
-            elif int(version) != INDEX_SCHEMA_VERSION:
-                raise ConfigError(f"{path} has index schema {version}; this smartrag "
-                                  f"reads {INDEX_SCHEMA_VERSION}")
             return index
         return cls(connection, path)
 
@@ -269,15 +292,15 @@ class SqliteIndex:
     def source_ids(self) -> set[str]:
         return {row[0] for row in self.db.execute("SELECT DISTINCT source_id FROM documents")}
 
-    def vectors_for(self, text_hashes: Iterable[str], profile: str) -> dict[str, bytes]:
+    def vectors_for(self, text_hashes: Iterable[str], space: str) -> dict[str, bytes]:
         found: dict[str, bytes] = {}
         hashes = list(set(text_hashes))
         for i in range(0, len(hashes), 500):
             batch = hashes[i:i + 500]
             marks = ",".join("?" * len(batch))
             for row in self.db.execute(
-                    f"SELECT text_hash, embedding FROM chunks WHERE profile = ? AND "
-                    f"embedding IS NOT NULL AND text_hash IN ({marks})", (profile, *batch)):
+                    f"SELECT text_hash, embedding FROM chunks WHERE vector_space = ? AND "
+                    f"embedding IS NOT NULL AND text_hash IN ({marks})", (space, *batch)):
                 found.setdefault(row["text_hash"], row["embedding"])
         return found
 
@@ -317,12 +340,12 @@ class SqliteIndex:
             for chunk in chunks:
                 cursor = self.db.execute(
                     "INSERT INTO chunks (chunk_id, doc_id, ordinal, start, end, prefix, "
-                    "heading_path, page, page_end, location, tokens, text_hash, profile, "
+                    "heading_path, page, page_end, location, tokens, text_hash, vector_space, "
                     "embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (chunk.chunk_id, doc.doc_id, chunk.ordinal, chunk.start, chunk.end,
                      chunk.prefix, json.dumps(chunk.heading_path, ensure_ascii=False),
                      chunk.page, chunk.page_end, chunk.location, chunk.tokens,
-                     chunk.text_hash, chunk.profile,
+                     chunk.text_hash, chunk.vector_space,
                      pack_vector(chunk.embedding) if chunk.embedding is not None else None))
                 self.db.execute("INSERT INTO chunk_fts (rowid, heading, body, path) "
                                 "VALUES (?, ?, ?, ?)",
@@ -442,7 +465,7 @@ class SqliteIndex:
         return IndexStats(
             documents=sum(counts.values()), ok=counts.get("ok", 0),
             skipped=counts.get("skipped", 0), failed=counts.get("failed", 0),
-            chunks=chunks[0], embedded=chunks[1], profile=self.meta("embedding_profile"),
+            chunks=chunks[0], embedded=chunks[1], vector_space=self.meta("vector_space"),
             dimensions=int(dimensions) if dimensions else None, last_indexed_at=last)
 
     def document_text(self, content_hash: str) -> str | None:

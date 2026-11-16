@@ -1,0 +1,148 @@
+# Smart RAG's embedding provider catalog (design memo §3.2, Appendix C).
+#
+# A kb's config names a provider and one of its models; everything else comes from here.
+# Fixed per provider: the URL (except oumigo and custom), the authentication, the dialect
+# and the request limits. Prices are USD per 1M input tokens.
+#
+# First wave (2026-11-16): oumigo, voyage_ai, openai, google_gemini, custom. Values marked
+# VERIFY are settled by live API calls before the entry is final (Appendix C).
+
+oumigo:
+  title: OumiGo
+  base_url_env: OUMIGO_EMBED_BASE_URL
+  api_key_env: OUMIGO_EMBED_API_KEY
+  dialect:
+    wire: openai
+    auth: bearer
+    # The router applies each profile's own prompts for input_type.
+    marking: {kind: field, field: input_type, query: query, document: document}
+  # OumiGo sets no per-request cap; this is Smart RAG's own batch_size bound.
+  max_inputs: 2048
+  data_terms: Self-hosted; text goes only to the OumiGo deployment you configure.
+  checked: '2026-11-16'
+  models:
+    ruri-v3-310m@8k:
+      canonical_name: cl-nagoya/ruri-v3-310m
+      dimensions: 768
+      max_input_tokens: 8192
+    harrier-oss-v1-0.6b@8k:
+      canonical_name: microsoft/harrier-oss-v1-0.6b
+      dimensions: 1024
+      max_input_tokens: 8192
+    harrier-oss-v1-0.6b@32k:
+      canonical_name: microsoft/harrier-oss-v1-0.6b
+      dimensions: 1024
+      max_input_tokens: 32768
+
+voyage_ai:  # live-tested 2026-11-16: voyage-4-lite at 1024 dimensions
+  title: Voyage AI
+  base_url: https://api.voyageai.com/v1
+  api_key_env: VOYAGE_API_KEY
+  key_required: true
+  dialect:
+    wire: openai
+    auth: bearer
+    marking: {kind: field, field: input_type, query: query, document: document}
+    dimensions_field: output_dimension  # VERIFY
+  max_inputs: 1000
+  data_terms: >-
+    Uses API data for training by default; opting out needs a payment method and an
+    org admin (https://docs.voyageai.com/docs/faq).
+  checked: '2026-11-11'
+  models:
+    voyage-4:
+      canonical_name: '@voyageai/voyage-4'
+      compatibility_id: '@voyageai/voyage-4-suite'
+      dimensions: 1024
+      allowed_dimensions: [256, 512, 1024, 2048]
+      max_input_tokens: 32000
+      max_request_tokens: 320000
+      price: 0.06
+    voyage-4-lite:
+      canonical_name: '@voyageai/voyage-4-lite'
+      compatibility_id: '@voyageai/voyage-4-suite'
+      dimensions: 1024
+      allowed_dimensions: [256, 512, 1024, 2048]
+      max_input_tokens: 32000
+      max_request_tokens: 1000000
+      price: 0.02
+    voyage-4-large:
+      canonical_name: '@voyageai/voyage-4-large'
+      compatibility_id: '@voyageai/voyage-4-suite'
+      dimensions: 1024
+      allowed_dimensions: [256, 512, 1024, 2048]
+      max_input_tokens: 32000
+      max_request_tokens: 120000
+      price: 0.12
+
+openai:  # live-tested 2026-11-16: text-embedding-3-small
+  title: OpenAI
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  key_required: true
+  dialect:
+    wire: openai
+    auth: bearer
+    marking: {kind: none}
+    dimensions_field: dimensions
+  max_inputs: 2048
+  max_request_tokens: 300000
+  data_terms: >-
+    API data is not used for training
+    (https://developers.openai.com/api/docs/guides/your-data).
+  checked: '2026-11-11'
+  models:
+    text-embedding-3-small:
+      canonical_name: '@openai/text-embedding-3-small'
+      dimensions: 1536
+      dimension_range: [1, 1536]
+      max_input_tokens: 8191
+      price: 0.02
+    text-embedding-3-large:
+      canonical_name: '@openai/text-embedding-3-large'
+      dimensions: 3072
+      dimension_range: [1, 3072]
+      max_input_tokens: 8191
+      price: 0.13
+
+google_gemini:  # live-tested 2026-11-16: gemini-embedding-2 at 3072 dimensions
+  title: Google Gemini
+  base_url: https://generativelanguage.googleapis.com/v1beta/openai
+  api_key_env: GEMINI_API_KEY
+  key_required: true
+  dialect:
+    wire: openai
+    auth: bearer
+    marking: {kind: none}
+    dimensions_field: dimensions
+  max_inputs: 100  # VERIFY: the compatible endpoint's per-request cap
+  data_terms: >-
+    Paid-tier keys only: free-tier content is used to improve Google's products
+    (https://aistudio.google.com/docs/pricing).
+  checked: '2026-11-11'
+  models:
+    gemini-embedding-2:
+      canonical_name: '@google/gemini-embedding-2'
+      dimensions: 3072
+      dimension_range: [128, 3072]
+      max_input_tokens: 8192
+      price: 0.20
+      marking:
+        kind: prefix
+        name: gemini-embedding-2
+        version: 1
+        query: 'task: search result | query: {text}'
+        document: 'title: none | text: {text}'
+
+custom:
+  title: Custom OpenAI-compatible endpoint
+  base_url_env: SMARTRAG_EMBED_BASE_URL
+  api_key_env: SMARTRAG_EMBED_API_KEY
+  dialect:
+    wire: openai
+    auth: bearer
+    marking: {kind: none}
+  max_inputs: 2048
+  data_terms: Whatever the endpoint's operator states.
+  checked: '2026-11-16'
+  models: {}

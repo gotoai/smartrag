@@ -47,8 +47,28 @@ class IndexInfo(BaseModel):
     skipped: int | None = None
     failed: int | None = None
     chunks: int | None = None
-    profile: str | None = None
+    vector_space: str | None = None
     last_sync_at: str | None = None
+
+
+class EmbeddingInfo(BaseModel):
+    """A local kb's embedding provider and model, and the vector space they give."""
+
+    provider_id: str
+    model_profile_id: str
+    model_canonical_name: str
+    vector_space: str
+
+
+class KbVerified(BaseModel):
+    """One test embedding through a kb's provider and model succeeded."""
+
+    kb: str
+    provider_id: str
+    model_profile_id: str
+    vector_space: str
+    url: str
+    took_ms: int
 
 
 class EnvInfo(BaseModel):
@@ -67,7 +87,7 @@ class KbStatus(BaseModel):
     kind: KbKind
     path: str
     description: str
-    embedding_profile: str | None = None
+    embedding: EmbeddingInfo | None = None
     remote: RemoteInfo | None = None
     sources: int
     sink_files: int | None = None
@@ -218,10 +238,19 @@ class SyncReport(BaseModel):
     started_at: str
     finished_at: str | None = None
     took_ms: int = 0
-    profile: str
+    provider_id: str
+    model_profile_id: str
+    vector_space: str
     pipeline_version: str
     embedding_parallelism: int = 1
     """The most embedding requests in flight at once during this run."""
+    resumed_documents: int = 0
+    """`reindex --rebuild`: documents a stopped rebuild had done, kept and not redone."""
+    adapt_to_rate_limit: bool = True
+    """Rate limits were waited out rather than stopping the run."""
+    rate_limit_waits: int = 0
+    rate_limit_wait_ms: int = 0
+    """Time spent waiting out rate limits, summed over the requests in flight."""
     sources: list[SourceSync] = Field(default_factory=list)
     counts: SyncCounts = Field(default_factory=SyncCounts)
     chunks_written: int = 0

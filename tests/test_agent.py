@@ -173,24 +173,23 @@ def test_endpoint_down_degrades_with_a_fixed_sentence_and_fails_fast(agent_home)
 
 
 def test_a_missing_endpoint_falls_back_to_keyword_search(agent_home, monkeypatch):
-    monkeypatch.delenv("SMARTRAG_EMBED_BASE_URL", raising=False)
-    monkeypatch.delenv("SMARTRAG_EMBED_API_KEY", raising=False)
+    monkeypatch.delenv("OUMIGO_EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("OUMIGO_EMBED_API_KEY", raising=False)
     r = AgentService(agent_home).search("legal", "賃金")
     assert r.search_mode == "keyword" and r.results
 
 
-def test_the_embedder_is_checked_once_per_kb(agent_home):
-    class Counting(CharEmbedder):
-        checks = 0
+def test_the_embedder_is_built_once_per_kb(agent_home):
+    built: list[str] = []
 
-        def check(self) -> int:
-            Counting.checks += 1
-            return super().check()
+    def factory(config):
+        built.append(config.model_profile_id)
+        return CharEmbedder()
 
-    service = _service(agent_home, Counting())
+    service = AgentService(agent_home, embedders=QueryEmbedders(factory))
     service.search("legal", "賃金")
     service.search("legal", "相続税")
-    assert Counting.checks == 1
+    assert built == ["ruri-v3-310m@8k"]
 
 
 # --- errors and titles -----------------------------------------------------------------

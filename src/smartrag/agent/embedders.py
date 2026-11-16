@@ -1,11 +1,10 @@
-"""Query embedders for a long-lived server: checked once, failing fast (design memo §3.9).
+"""Query embedders for a long-lived server: built once, failing fast (design memo §3.9).
 
-`kb search` builds an `HttpEmbedder` per search and asks `/v1/models` each time; and the
-sync's embedder waits up to 120 s × 3 attempts, about 6 minutes, before giving up. Both
-suit a one-shot command, not an agent waiting on a tool call (Kari's extensions time out
-after 300 s). Here:
+`kb search` builds an embedder per search, and the sync's embedder waits up to 120 s × 3
+attempts, about 6 minutes, before giving up. Both suit a one-shot command, not an agent
+waiting on a tool call (Kari's extensions time out after 300 s). Here:
 
-* each kb keeps one embedder for the life of the process, checked on first use;
+* each kb keeps one embedder for the life of the process, built on first use;
 * a query waits `QUERY_TIMEOUT` seconds with one retry: a healthy endpoint embeds one
   query in well under a second;
 * after a failure, the vector side is skipped for `COOLDOWN` seconds, so each search
@@ -22,7 +21,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 
-from smartrag.embedding import Embedder, HttpEmbedder, InputType
+from smartrag.embedding.api import Embedder, Side, open_embedder
 from smartrag.errors import ConfigError, EmbedderUnavailable
 from smartrag.kb.config import EmbeddingConfig
 
@@ -34,21 +33,19 @@ EmbedderFactory = Callable[[EmbeddingConfig], Embedder]
 
 
 def _http(config: EmbeddingConfig) -> Embedder:
-    return HttpEmbedder(config, timeout=QUERY_TIMEOUT, attempts=QUERY_ATTEMPTS)
+    return open_embedder(config, timeout=QUERY_TIMEOUT, attempts=QUERY_ATTEMPTS)
 
 
 class GuardedEmbedder:
-    """One kb's query embedder: built and checked on first use, skipped while down."""
+    """One kb's query embedder: built on first use, skipped while down."""
 
     def __init__(self, config: EmbeddingConfig, factory: EmbedderFactory, cooldown: float,
                  clock: Callable[[], float]) -> None:
-        self.profile = config.profile
         self._config = config
         self._factory = factory
         self._cooldown = cooldown
         self._clock = clock
         self._inner: Embedder | None = None
-        self._checked = False
         self._down_until = 0.0
         self._lock = threading.Lock()
 
@@ -59,27 +56,18 @@ class GuardedEmbedder:
             try:
                 if self._inner is None:
                     self._inner = self._factory(self._config)
-                if not self._checked:
-                    self._inner.check()  # learns whether the model takes input_type
-                    self._checked = True
             except ConfigError as exc:
                 self._mark_down()
                 raise EmbedderUnavailable(exc.message) from exc
-            except EmbedderUnavailable:
-                self._mark_down()
-                raise
             return self._inner
 
     def _mark_down(self) -> None:
         self._down_until = self._clock() + self._cooldown
 
-    def check(self) -> int | None:
-        return getattr(self._ready(), "dimensions", None)
-
-    def embed(self, texts: Sequence[str], input_type: InputType) -> list[list[float]]:
+    def embed(self, texts: Sequence[str], side: Side) -> list[list[float]]:
         inner = self._ready()
         try:
-            return inner.embed(texts, input_type)
+            return inner.embed(texts, side)
         except EmbedderUnavailable:
             self._mark_down()
             raise

@@ -6,24 +6,21 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 
 import pytest
 from typer.testing import CliRunner
 
-from smartrag.errors import ConfigError
+from smartrag.errors import ConfigError, EmbedderUnavailable
 from smartrag.index import SqliteIndex
 from smartrag.kb import Home, add_source, remove_source
 from smartrag.kb.sync import sync_kb
 
 
 class FakeEmbedder:
-    def __init__(self, profile: str = "ruri-v3-310m@8k", dims: int = 8) -> None:
-        self.profile = profile
+    def __init__(self, dims: int = 8) -> None:
         self.dims = dims
         self.calls: list[int] = []
-
-    def check(self) -> int:
-        return self.dims
 
     def embed(self, texts, input_type):
         assert input_type == "document"
@@ -62,8 +59,9 @@ def test_first_sync_indexes_and_records_skips(home, docs):
     assert report.issues[0].path == "image.png" and "unsupported" in report.issues[0].reason
     assert report.chunks_embedded == report.chunks_written > 0
     stats = _store(home).stats()
-    assert (stats.ok, stats.skipped, stats.profile, stats.dimensions) == \
-        (2, 1, "ruri-v3-310m@8k", 8)
+    assert (stats.ok, stats.skipped, stats.vector_space, stats.dimensions) == \
+        (2, 1, "cl-nagoya/ruri-v3-310m|768|field:input_type", 768)
+    assert report.vector_space == stats.vector_space
     assert report.report_path
     with open(report.report_path, encoding="utf-8") as handle:
         assert json.load(handle)["kb"] == "legal"
@@ -127,14 +125,74 @@ def test_dry_run_writes_nothing(home, docs):
     assert list((home.root / "legal" / "runs").iterdir()) == []
 
 
-def test_profile_mismatch_stops_the_sync(home, docs):
+def _switch_model(home, kb, old, new):
+    path = home.root / kb / "config.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+
+
+def test_a_model_in_another_vector_space_stops_the_sync(home, docs):
     add_source(home, "legal", "docs", str(docs))
     sync_kb(home, "legal", embedder=FakeEmbedder())
-    path = home.root / "legal" / "config.yaml"
-    path.write_text(path.read_text(encoding="utf-8").replace("ruri-v3-310m@8k", "other@1"),
-                    encoding="utf-8")
+    _switch_model(home, "legal", "ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k")
     with pytest.raises(ConfigError, match="cannot be mixed"):
-        sync_kb(home, "legal", embedder=FakeEmbedder(profile="other@1"))
+        sync_kb(home, "legal", embedder=FakeEmbedder())
+
+
+def test_a_profile_in_the_same_vector_space_keeps_every_vector(home, docs):
+    home.new("multi", model_profile_id="harrier-oss-v1-0.6b@32k")
+    add_source(home, "multi", "docs", str(docs))
+    first = sync_kb(home, "multi", embedder=FakeEmbedder())
+    _switch_model(home, "multi", "harrier-oss-v1-0.6b@32k", "harrier-oss-v1-0.6b@8k")
+    embedder = FakeEmbedder()
+    second = sync_kb(home, "multi", embedder=embedder, force=True)  # every file processed
+    assert second.vector_space == first.vector_space
+    assert second.counts.updated == 2 and embedder.calls == []
+    assert second.chunks_reused == first.chunks_written
+    store = SqliteIndex.open(home.root / "multi" / "index.db", readonly=True)
+    assert store.meta("model_profile_id") == "harrier-oss-v1-0.6b@8k"
+    store.close()
+
+
+def test_a_failed_request_counts_in_the_embed_time(home, docs):
+    class Slow(FakeEmbedder):
+        def embed(self, texts, input_type):
+            time.sleep(0.2)
+            raise EmbedderUnavailable("HTTP 429: slow down")
+
+    add_source(home, "legal", "docs", str(docs))
+    report = sync_kb(home, "legal", embedder=Slow())
+    assert report.error == "HTTP 429: slow down"
+    assert report.timings_ms["embed"] >= 200
+
+
+class Throttled(FakeEmbedder):
+    """Reports one rate-limit wait per request, as the HTTP embedder does when adapting."""
+
+    on_wait = None
+
+    def embed(self, texts, input_type):
+        if self.on_wait is not None:
+            self.on_wait(1.5, "rate_limited")
+        return super().embed(texts, input_type)
+
+
+def test_rate_limit_waits_are_shown_and_counted(home, docs):
+    add_source(home, "legal", "docs", str(docs))
+    events: list[dict] = []
+    embedder = Throttled()
+    report = sync_kb(home, "legal", embedder=embedder, progress=events.append)
+    waits = [e for e in events if e["event"] == "wait"]
+    assert report.adapt_to_rate_limit and report.rate_limit_waits == len(embedder.calls) > 0
+    assert waits[0] == {"event": "wait", "seconds": 1.5, "kind": "rate_limited"}
+    assert report.rate_limit_wait_ms == 1500 * report.rate_limit_waits
+
+
+def test_not_adapting_leaves_the_embedder_alone(home, docs):
+    add_source(home, "legal", "docs", str(docs))
+    embedder = Throttled()
+    report = sync_kb(home, "legal", embedder=embedder, adapt_to_rate_limit=False)
+    assert embedder.on_wait is None and report.rate_limit_waits == 0
+    assert not report.adapt_to_rate_limit
 
 
 def test_removing_a_source_removes_its_documents(home, docs):

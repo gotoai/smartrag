@@ -32,14 +32,15 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import LiteralScalarString
 
+from smartrag.embedding.resolve import resolve
 from smartrag.errors import ConfigError
 
 CONFIG_FILE = "config.yaml"
 CONFIG_VERSION = 1
 SINK_ID = "sink"
-DEFAULT_PROFILE = "ruri-v3-310m@8k"
-DEFAULT_EMBED_URL_ENV = "SMARTRAG_EMBED_BASE_URL"
-DEFAULT_EMBED_KEY_ENV = "SMARTRAG_EMBED_API_KEY"
+DEFAULT_PROVIDER = "oumigo"
+DEFAULT_MODEL = "ruri-v3-310m@8k"
+"""What `kb new` writes when no provider and model are given."""
 MAX_DESCRIPTION = 300
 """Characters of a kb's description, counted as agents see it (one paragraph). Agents
 choose a kb by it, and the MCP server puts it in every session's instructions."""
@@ -83,8 +84,8 @@ def check_description(text: str) -> str:
 def _secret_ref(value: str | None) -> str | None:
     if value is not None and not ENV_REF.match(value):
         raise ValueError(
-            f"must be an environment variable reference such as "
-            f"${{{DEFAULT_EMBED_KEY_ENV}}}, never the secret itself")
+            "must be an environment variable reference such as ${OPENAI_API_KEY}, never "
+            "the secret itself")
     return value
 
 
@@ -103,28 +104,63 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class EmbeddingConfig(_Strict):
-    """Where this kb's vectors come from. The profile id is recorded with every vector:
-    a different model is a different vector space."""
+class PrefixConfig(_Strict):
+    """A custom endpoint's query and document templates, each with `{text}`."""
 
-    base_url: str = f"${{{DEFAULT_EMBED_URL_ENV}}}"
-    """The endpoint's base (`…/v1`) or its full `…/v1/embeddings` URL."""
+    query: str
+    document: str
+
+
+class EmbeddingConfig(_Strict):
+    """Where this kb's vectors come from (design memo §3.2): a provider and one of its
+    models from Smart RAG's catalog, plus this kb's own settings. Everything else (the
+    URL of a cloud provider, the dialect, the limits) comes from the catalog, so it is
+    never copied here. The index records the resulting vector space."""
+
+    provider_id: str
+    model_profile_id: str
+    """The model as the provider names it, sent as `model` in each request."""
+    base_url: str | None = None
+    """`oumigo` and `custom` only: the endpoint's base (`…/v1`) or its full
+    `…/v1/embeddings` URL. Defaults to the provider's variable, e.g.
+    `${OUMIGO_EMBED_BASE_URL}`; every other provider's URL is fixed by the catalog."""
     api_key: str | None = None
-    """A `${VAR}` reference. Omit it, or leave its variable unset or empty, for an endpoint
-    without authentication: then no Authorization header is sent at all."""
-    profile: str = DEFAULT_PROFILE
+    """A `${VAR}` reference. Defaults to the provider's usual variable, e.g.
+    `${OPENAI_API_KEY}`. Leave the variable unset or empty for an endpoint without
+    authentication: then no Authorization header is sent at all."""
+    dimensions: int | None = Field(default=None, ge=1)
+    """Shorter vectors, for a model that allows them. Required for `custom`."""
     batch_size: int = Field(default=32, ge=1, le=2048)
-    """Texts per request. Keep within the endpoint's per-request input cap."""
+    """Texts per request, within the provider's per-request limit."""
     parallelism: int = Field(default=1, ge=1)
     """The most embedding requests `sync` keeps in flight at once, each in its own worker
     process. 1 sends them one at a time, with no worker processes. A remote endpoint,
     where each request waits for a network round trip, indexes faster with more.
     `--embedding-parallelism` overrides it for one run."""
 
+    # --- `custom` only: what the catalog states for every other provider ------------
+    model_canonical_name: str | None = None
+    """The Hugging Face repo id of an open model; `@<vendor>/<model>` for a closed one."""
+    model_embedding_compatibility_id: str | None = None
+    """Defaults to `model_canonical_name`; set it when several models share vectors."""
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    dialect: Literal["openai_plain", "openai_input_type", "openai_prefix"] | None = None
+    """How queries and documents are marked: not at all (the default), by
+    `input_type: query | document`, or by `prefix` templates."""
+    prefix: PrefixConfig | None = None
+
     @field_validator("api_key")
     @classmethod
     def _api_key_is_ref(cls, value: str | None) -> str | None:
         return _secret_ref(value)
+
+    @model_validator(mode="after")
+    def _in_catalog(self) -> EmbeddingConfig:
+        try:
+            resolve(self)
+        except ConfigError as exc:
+            raise ValueError(exc.message) from exc
+        return self
 
 
 class ChunkConfig(_Strict):
@@ -251,6 +287,10 @@ class KbConfig(_Strict):
                 raise ValueError("a local kb needs an `embedding` section")
             if self.chunk is None:
                 self.chunk = ChunkConfig()
+            limit = resolve(self.embedding).max_input_tokens
+            if self.chunk.max_tokens > limit:
+                raise ValueError(f"chunk.max_tokens {self.chunk.max_tokens} is over the "
+                                 f"embedding model's input limit of {limit} tokens")
             if self.sink is None:
                 self.sink = SINK_ID
             seen: set[str] = set()
@@ -272,9 +312,14 @@ class KbConfig(_Strict):
         return self
 
     def env_refs(self) -> list[str]:
-        """Every `${VAR}` this config references, in order of first appearance."""
+        """Every `${VAR}` this config references, in order of first appearance, including
+        the embedding provider's variables when the config leaves them to the catalog."""
         names: list[str] = []
-        for value in _strings(self.model_dump(mode="json")):
+        values = _strings(self.model_dump(mode="json"))
+        if self.embedding is not None:
+            spec = resolve(self.embedding)
+            values += [spec.base_url] + ([spec.api_key] if spec.api_key else [])
+        for value in values:
             for name in _ENV_REF_ANYWHERE.findall(value):
                 if name not in names:
                     names.append(name)
@@ -424,8 +469,9 @@ class ConfigDocument:
             data["embedding"] = CommentedMap(model.embedding.model_dump(mode="json",
                                                                         exclude_none=True))
             data.yaml_set_comment_before_after_key(
-                "embedding", before="Where vectors come from. The profile id is stored with "
-                                    "every vector; changing it means `kb reindex`. "
+                "embedding", before="Where vectors come from: a provider and one of its "
+                                    "models (`smartrag run provider list`). A model in "
+                                    "another vector space means `kb reindex --rebuild`. "
                                     "parallelism: embedding requests in flight at once "
                                     "during sync; raise it for a remote endpoint.")
             data["chunk"] = CommentedMap(model.chunk.model_dump(mode="json"))

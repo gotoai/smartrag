@@ -48,7 +48,10 @@ def test_new_local_kb_layout_and_permissions(home):
     assert stat.S_IMODE((kb_dir / CONFIG_FILE).stat().st_mode) == 0o600
     config = load_config(kb_dir / CONFIG_FILE)
     assert config.embedding is not None
-    assert config.embedding.api_key == "${SMARTRAG_EMBED_API_KEY}"
+    assert (config.embedding.provider_id, config.embedding.model_profile_id) == \
+        ("oumigo", "ruri-v3-310m@8k")
+    assert config.embedding.base_url == "${OUMIGO_EMBED_BASE_URL}"
+    assert config.embedding.api_key == "${OUMIGO_EMBED_API_KEY}"
     assert config.sink == "sink" and config.sources == []
 
 
@@ -85,14 +88,17 @@ def test_new_rejects_remote_options_without_remote(home):
 
 def _base(**extra):
     data = {"version": 1, "id": "legal", "title": "t", "kind": "local",
-            "embedding": {"base_url": "${U}", "api_key": "${K}", "profile": "p"}}
+            "embedding": {"provider_id": "custom", "model_profile_id": "p", "base_url": "${U}",
+                          "api_key": "${K}", "model_canonical_name": "org/p",
+                          "dimensions": 8, "max_input_tokens": 8192}}
     data.update(extra)
     return data
 
 
 def test_literal_secrets_are_rejected():
     with pytest.raises(ValueError, match="environment variable reference"):
-        KbConfig.model_validate(_base(embedding={"base_url": "${U}", "api_key": "sk-123"}))
+        KbConfig.model_validate(_base(embedding={"provider_id": "openai", "api_key": "sk-123",
+                                                 "model_profile_id": "text-embedding-3-small"}))
     with pytest.raises(ValueError, match="environment variable reference"):
         KbConfig.model_validate({"id": "f", "title": "f", "kind": "remote", "remote": {
             "endpoint": "https://x.example", "kb": "f", "token": "abc"}})
@@ -146,14 +152,16 @@ def test_list_reports_each_kb_without_failing_on_a_broken_one(home):
 
 
 def test_status_warns_about_what_needs_doing(home, monkeypatch, tmp_path):
-    monkeypatch.delenv("SMARTRAG_EMBED_API_KEY", raising=False)
-    monkeypatch.setenv("SMARTRAG_EMBED_BASE_URL", "http://oumigo.local/v1")
+    monkeypatch.delenv("OUMIGO_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("OUMIGO_EMBED_BASE_URL", "http://oumigo.local/v1")
     home.new("legal")
     status = home.status("legal")
-    assert status.env.missing == ["SMARTRAG_EMBED_API_KEY"]
+    assert status.env.missing == ["OUMIGO_EMBED_API_KEY"]
+    assert status.embedding is not None
+    assert status.embedding.vector_space == "cl-nagoya/ruri-v3-310m|768|field:input_type"
     assert status.index is not None and not status.index.exists
     joined = " ".join(status.warnings)
-    for expected in ("no description", "SMARTRAG_EMBED_API_KEY", "no index yet", "no sources"):
+    for expected in ("no description", "OUMIGO_EMBED_API_KEY", "no index yet", "no sources"):
         assert expected in joined
     with pytest.raises(NotFound):
         home.status("nope")
@@ -305,7 +313,8 @@ def test_commands_keep_hand_written_comments_and_formatting(home, tmp_path):
     assert text.startswith("# Smart RAG knowledge base.")
     assert "# What this kb contains" in text
     text = text.replace("description: ''", "description: |\n  契約書と規程。\n  判例は含まない。")
-    text = text.replace("  profile: ruri-v3-310m@8k", "  profile: ruri-v3-310m@8k   # chosen by eval")
+    text = text.replace("  model_profile_id: ruri-v3-310m@8k",
+                        "  model_profile_id: ruri-v3-310m@8k   # chosen by eval")
     path.write_text(text + "# TODO: add the 人事 share\n", encoding="utf-8")
 
     add_source(home, "legal", "docs", str(docs), include=["**/*.pdf"])
@@ -325,6 +334,6 @@ def test_hand_edits_that_break_the_rules_are_caught_on_load(home):
     home.new("legal")
     path = home.root / "legal" / CONFIG_FILE
     path.write_text(path.read_text(encoding="utf-8").replace(
-        "${SMARTRAG_EMBED_API_KEY}", "sk-live-123"), encoding="utf-8")
+        "${OUMIGO_EMBED_API_KEY}", "sk-live-123"), encoding="utf-8")
     with pytest.raises(ConfigError, match="environment variable reference"):
         home.load("legal")

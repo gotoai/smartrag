@@ -4,10 +4,10 @@ Search reads every chunk vector (brute force, design memo §3.3). Pulling thousa
 BLOBs out of SQLite on every query is slow, so the matrix is built once per index
 generation, normalised (ruri-v3's vectors are not unit length), and saved as `.npy` files
 that later searches memory-map. The SQLite index stays the source of truth; the cache is
-disposable and rebuilt whenever the generation or the profile changes. If the cache
+disposable and rebuilt whenever the generation or the vector space changes. If the cache
 cannot be written, the matrix is simply used from memory.
 
-The query-embedding cache keeps one vector per (profile, query) under a hash of the two,
+The query-embedding cache keeps one vector per (vector space, query) under a hash of the two,
 so a second page or a repeated query does not call the endpoint again. It stores no query
 text.
 """
@@ -25,7 +25,7 @@ import numpy as np
 
 from smartrag.index import SqliteIndex
 
-_CACHE_SCHEMA = 1
+_CACHE_SCHEMA = 2
 
 
 @dataclass
@@ -53,8 +53,8 @@ def _build(store: SqliteIndex) -> VectorMatrix:
     return VectorMatrix(np.asarray(rowids, dtype=np.int64), matrix / norms)
 
 
-def load_vectors(store: SqliteIndex, cache_dir: Path, profile: str) -> VectorMatrix:
-    stamp = {"schema": _CACHE_SCHEMA, "generation": store.generation(), "profile": profile}
+def load_vectors(store: SqliteIndex, cache_dir: Path, space: str) -> VectorMatrix:
+    stamp = {"schema": _CACHE_SCHEMA, "generation": store.generation(), "space": space}
     meta_path = cache_dir / "vectors.json"
     matrix_path, ids_path = cache_dir / "vectors.npy", cache_dir / "vector_ids.npy"
     try:
@@ -82,36 +82,36 @@ class QueryVectorCache:
         self.path = cache_dir / "query_vectors.db"
 
     @staticmethod
-    def _key(profile: str, query: str) -> str:
-        return hashlib.sha256(f"{profile}\0{query}".encode()).hexdigest()
+    def _key(space: str, query: str) -> str:
+        return hashlib.sha256(f"{space}\0{query}".encode()).hexdigest()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5)
         db.execute("CREATE TABLE IF NOT EXISTS q (key TEXT PRIMARY KEY, vector BLOB NOT NULL)")
         return db
 
-    def get(self, profile: str, query: str) -> np.ndarray | None:
+    def get(self, space: str, query: str) -> np.ndarray | None:
         if not self.path.is_file():
             return None
         try:
             db = self._connect()
             try:
                 row = db.execute("SELECT vector FROM q WHERE key = ?",
-                                 (self._key(profile, query),)).fetchone()
+                                 (self._key(space, query),)).fetchone()
             finally:
                 db.close()
         except sqlite3.Error:
             return None
         return None if row is None else np.frombuffer(row[0], dtype=np.float32)
 
-    def put(self, profile: str, query: str, vector: np.ndarray) -> None:
+    def put(self, space: str, query: str, vector: np.ndarray) -> None:
         try:
             self.path.parent.mkdir(mode=0o700, exist_ok=True)
             db = self._connect()
             try:
                 with db:
                     db.execute("INSERT OR REPLACE INTO q (key, vector) VALUES (?, ?)",
-                               (self._key(profile, query),
+                               (self._key(space, query),
                                 np.asarray(vector, dtype=np.float32).tobytes()))
             finally:
                 db.close()

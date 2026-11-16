@@ -12,6 +12,9 @@ returns their vectors, with no index connection and no shared state.
 * Workers ignore SIGINT: Ctrl-C is the main process's to handle, and it stops the pool.
 * A worker exits when the main process does, even one killed outright; otherwise it would
   be left running. That watch is the only thread in a worker, and it does nothing else.
+* Adapting to rate limits: a worker reports each wait through a queue as it starts, so the
+  main process can show it and halve `limit`, the requests it keeps in flight; `limit`
+  grows back by one after each `limit` requests that finish without a wait.
 """
 
 from __future__ import annotations
@@ -25,8 +28,12 @@ from concurrent import futures
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any
 
-from smartrag.embedding import Embedder
+from smartrag.embedding.api import Embedder
+from smartrag.embedding.transport import OnWait
 from smartrag.errors import EmbedderUnavailable
+
+_EVENT_POLL = 0.2
+"""Seconds between looks at the wait queue while blocked on requests."""
 
 Vectors = list[list[float]]
 
@@ -35,10 +42,16 @@ class EmbedPool:
     """At most `parallelism` embedding requests in flight. Each request carries a `tag`,
     which `wait` returns with the request's vectors."""
 
-    def __init__(self, embedder: Embedder, parallelism: int) -> None:
+    def __init__(self, embedder: Embedder, parallelism: int,
+                 on_wait: OnWait | None = None) -> None:
         self.embedder = embedder
         self.parallelism = parallelism
+        self.limit = parallelism
+        """Requests to keep in flight now: lowered while rate limited."""
+        self.on_wait = on_wait
+        self._calm = 0
         self._executor: futures.ProcessPoolExecutor | None = None
+        self._events: Any = None
         self._requests: dict[futures.Future[tuple[Vectors | None, str | None, int]], Any] = {}
 
     @property
@@ -47,9 +60,12 @@ class EmbedPool:
 
     def submit(self, texts: list[str], tag: Any) -> None:
         if self._executor is None:
+            context = multiprocessing.get_context("spawn")
+            if self.on_wait is not None:
+                self._events = context.SimpleQueue()
             self._executor = futures.ProcessPoolExecutor(
-                self.parallelism, mp_context=multiprocessing.get_context("spawn"),
-                initializer=_start_worker, initargs=(self.embedder,))
+                self.parallelism, mp_context=context,
+                initializer=_start_worker, initargs=(self.embedder, self._events))
         self._requests[self._executor.submit(_embed, texts)] = tag
 
     def wait(self, *, block: bool) -> list[tuple[Any, Vectors, int]]:
@@ -57,8 +73,13 @@ class EmbedPool:
         waits for at least one. A failed request raises `EmbedderUnavailable`."""
         if not self._requests:
             return []
-        done, _ = futures.wait(self._requests, timeout=None if block else 0,
-                               return_when=futures.FIRST_COMPLETED)
+        while True:
+            timeout = (_EVENT_POLL if self._events is not None else None) if block else 0
+            done, _ = futures.wait(self._requests, timeout=timeout,
+                                   return_when=futures.FIRST_COMPLETED)
+            self._drain()
+            if done or not block:
+                break
         finished: list[tuple[Any, Vectors, int]] = []
         for request in done:
             tag = self._requests.pop(request)
@@ -68,10 +89,23 @@ class EmbedPool:
                 raise EmbedderUnavailable("an embedding worker process stopped "
                                           "unexpectedly") from None
             if error is not None:
-                raise EmbedderUnavailable(error)
+                raise EmbedderUnavailable(error, details={"took_ms": took_ms})
             assert vectors is not None
             finished.append((tag, vectors, took_ms))
+            self._calm += 1
+            if self._calm >= self.limit and self.limit < self.parallelism:
+                self.limit += 1
+                self._calm = 0
         return finished
+
+    def _drain(self) -> None:
+        """Pass on the waits the workers reported, and halve the requests in flight."""
+        while self._events is not None and not self._events.empty():
+            seconds, kind = self._events.get()
+            self.limit = max(1, self.limit // 2)
+            self._calm = 0
+            if self.on_wait is not None:
+                self.on_wait(seconds, kind)
 
     def close(self) -> None:
         """Shut the pool down: at once, abandoning them, if requests are still in flight
@@ -101,9 +135,11 @@ class EmbedPool:
 _embedder: Embedder | None = None
 
 
-def _start_worker(embedder: Embedder) -> None:
+def _start_worker(embedder: Embedder, events: Any) -> None:
     global _embedder
     _embedder = embedder
+    if events is not None and hasattr(embedder, "on_wait"):
+        embedder.on_wait = lambda seconds, kind: events.put((seconds, kind))
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     parent = multiprocessing.parent_process()
     if parent is not None:

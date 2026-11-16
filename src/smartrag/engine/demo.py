@@ -1,5 +1,5 @@
 """A small demo corpus: company rules and an expense manual (Japanese), a product README
-(English), across two sources. Used by `smartrag serve --demo` and the API tests."""
+(English), across two sources. Used by `smartrag serve --demo=true` and the API tests."""
 
 from __future__ import annotations
 

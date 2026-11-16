@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from smartrag.embedding.resolve import resolve
 from smartrag.errors import ConfigError, CursorExpired, IndexNotReady, InvalidRequest
 from smartrag.index import SqliteIndex
 from smartrag.kb.config import KbConfig
@@ -53,9 +54,10 @@ class DocAttributes:
     attributes: dict[str, Any]
 
 
-def open_kb(home: Home, kb_id: str, *, check_profile: bool) -> OpenKb:
+def open_kb(home: Home, kb_id: str, *, check_space: bool) -> OpenKb:
     """A local kb's index, opened read-only. Raises if the kb is remote, has no index,
-    or (when searching) its index was built with a different embedding profile."""
+    or (when searching) its index holds another vector space than the config's model
+    gives (design memo §3.2)."""
     config = home.load(kb_id)
     if config.kind == "remote":
         raise InvalidRequest(f"kb {kb_id!r} is remote; v1 searches and reads local kbs only",
@@ -66,15 +68,16 @@ def open_kb(home: Home, kb_id: str, *, check_profile: bool) -> OpenKb:
         raise IndexNotReady(f"kb {kb_id!r} has no index yet: run "
                             f"`smartrag run kb sync --kb {kb_id}`", {"kb": kb_id})
     store = SqliteIndex.open(path, readonly=True)
-    if check_profile:
+    if check_space:
         assert config.embedding is not None
-        held = store.meta("embedding_profile")
-        if held is not None and held != config.embedding.profile:
+        held = store.meta("vector_space")
+        space = resolve(config.embedding).space.key
+        if held is not None and held != space:
             store.close()
             raise ConfigError(
-                f"the index holds vectors from {held!r} but the config says "
-                f"{config.embedding.profile!r}; restore the profile or rebuild the index",
-                {"index_profile": held, "config_profile": config.embedding.profile})
+                f"the index holds vectors in the space {held!r} but the config's model gives "
+                f"{space!r}; go back to a model in the index's space, or rebuild the index",
+                {"index_space": held, "config_space": space})
     return OpenKb(config, kb_dir, store)
 
 

@@ -18,13 +18,9 @@ from smartrag.search import search_kb
 
 
 class Embedder:
-    def __init__(self, profile: str = "ruri-v3-310m@8k", fail: bool = False) -> None:
-        self.profile = profile
+    def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.embedded = 0
-
-    def check(self) -> int:
-        return 4
 
     def embed(self, texts, input_type):
         if self.fail:
@@ -184,24 +180,90 @@ def test_rebuild_reuses_vectors_and_continues_the_generation(home, synced):
 
 def test_rebuild_is_how_a_kb_changes_its_model(home, synced):
     path = home.root / "legal" / "config.yaml"
-    path.write_text(path.read_text(encoding="utf-8").replace("ruri-v3-310m@8k", "other@2"),
-                    encoding="utf-8")
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k"), encoding="utf-8")
     with pytest.raises(ConfigError, match="reindex --kb <id> --rebuild"):
-        sync_kb(home, "legal", embedder=Embedder("other@2"))
-    embedder = Embedder("other@2")
+        sync_kb(home, "legal", embedder=Embedder())
+    embedder = Embedder()
     report = reindex_rebuild(home, "legal", embedder=embedder)
     assert embedder.embedded == report.chunks_written > 0
     store = SqliteIndex.open(home.root / "legal" / "index.db", readonly=True)
-    assert store.meta("embedding_profile") == "other@2"
+    assert store.meta("vector_space") == "microsoft/harrier-oss-v1-0.6b|1024|field:input_type"
     store.close()
+
+
+def test_an_index_of_the_old_schema_is_refused_until_rebuilt(home, synced):
+    import sqlite3
+
+    index = home.root / "legal" / "index.db"
+    with sqlite3.connect(index) as db:
+        db.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+        db.execute("DELETE FROM meta WHERE key = 'vector_space'")
+    with pytest.raises(ConfigError, match="older smartrag"):
+        search_kb(home, "legal", "文書", embedder=Embedder())
+    with pytest.raises(ConfigError, match="older smartrag"):
+        sync_kb(home, "legal", embedder=Embedder())
+    report = reindex_rebuild(home, "legal", embedder=Embedder())
+    assert report.error is None and report.chunks_written > 0
+    assert search_kb(home, "legal", "文書", embedder=Embedder()).results
 
 
 def test_a_failed_rebuild_keeps_the_old_index(home, synced, tmp_path):
     (synced / "more.txt").write_text("追加の文書。" * 10, encoding="utf-8")
     report = reindex_rebuild(home, "legal", embedder=Embedder(fail=True))
-    assert report.error and "old index was kept" in report.error
+    assert report.error and "old index is still in use" in report.error
     assert len(_documents(home)) == 3
+
+
+class FailsAfter(Embedder):
+    """Embeds `calls` requests, then fails like an endpoint that went away."""
+
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self.calls = calls
+
+    def embed(self, texts, input_type):
+        if self.calls <= 0:
+            raise EmbedderUnavailable("endpoint down")
+        self.calls -= 1
+        return super().embed(texts, input_type)
+
+
+def _switch_to_harrier(home):
+    """Another vector space: the old index lends no vectors, so a rebuild embeds them all."""
+    path = home.root / "legal" / "config.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k"), encoding="utf-8")
+
+
+def test_a_stopped_rebuild_is_continued_without_embedding_twice(home, synced):
+    _switch_to_harrier(home)
+    stopped = reindex_rebuild(home, "legal", embedder=FailsAfter(2))
+    assert stopped.error and "continue where this one stopped" in stopped.error
+    assert (home.root / "legal" / "index.db.rebuild").is_file()
+    assert "stopped `kb reindex --rebuild`" in " ".join(home.status("legal").warnings)
+
+    embedder = Embedder()
+    report = reindex_rebuild(home, "legal", embedder=embedder)
+    assert report.error is None and report.resumed_documents == 2
+    assert report.counts.unchanged == 2 and report.counts.added == 1
+    assert embedder.embedded == 1  # only the document the stopped run did not reach
     assert not list((home.root / "legal").glob("index.db.rebuild*"))
+    store = SqliteIndex.open(home.root / "legal" / "index.db", readonly=True)
+    assert store.meta("model_profile_id") == "harrier-oss-v1-0.6b@8k"
+    assert store.stats().ok == 3
+    store.close()
+
+
+def test_a_stopped_rebuild_in_another_vector_space_is_started_afresh(home, synced):
+    _switch_to_harrier(home)
+    reindex_rebuild(home, "legal", embedder=FailsAfter(2))
+    path = home.root / "legal" / "config.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "harrier-oss-v1-0.6b@8k", "ruri-v3-310m@8k"), encoding="utf-8")
+    report = reindex_rebuild(home, "legal", embedder=Embedder())
+    assert report.error is None and report.resumed_documents == 0
+    assert report.counts.added == 3
 
 
 def test_rebuild_dry_run_changes_nothing(home, synced):
@@ -225,6 +287,6 @@ def test_cli_rules(home, synced, originals):
     unconfirmed = runner.invoke(app, [*base, "kb", "reindex", "--kb", "legal", "--rebuild"])
     assert unconfirmed.exit_code == 1 and "--yes" in unconfirmed.stderr
     dry = runner.invoke(app, [*base, "--format", "json", "kb", "ingest", "--kb", "legal",
-                              str(originals), "-r", "--dry-run"])
+                              str(originals), "--recursive=true", "--dry-run"])
     assert dry.exit_code == 3  # 画像.png would be skipped
     assert json.loads(dry.stdout.splitlines()[-1])["dry_run"] is True

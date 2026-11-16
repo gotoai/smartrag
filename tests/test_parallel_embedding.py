@@ -22,21 +22,21 @@ from smartrag.kb import Home, add_source
 from smartrag.kb.embed_pool import EmbedPool
 from smartrag.kb.sync import sync_kb
 
-PROFILE = "ruri-v3-310m@8k"
-
 
 def _vector(text: str) -> list[float]:
-    return [b / 255 for b in hashlib.sha256(text.encode()).digest()[:4]]
+    """768 values, as ruri-v3-310m@8k (the kbs' model) returns."""
+    return [b / 255 for b in hashlib.sha256(text.encode()).digest()[:4]] * 192
 
 
 class _Endpoint:
     """A local OpenAI-compatible endpoint that takes `delay` seconds per request and
     records the most requests it had in flight at once. A text containing `fail` is
-    answered 400."""
+    answered 400; the first `throttle` requests are answered 429 with `Retry-After: 1`."""
 
     def __init__(self, delay: float) -> None:
         self.delay = delay
         self.fail: str | None = None
+        self.throttle = 0
         self.requests = 0
         self.peak = 0
         self._active = 0
@@ -46,19 +46,24 @@ class _Endpoint:
         endpoint = self
 
         class Handler(BaseHTTPRequestHandler):
-            def _reply(self, status: int, body: dict) -> None:
+            def _reply(self, status: int, body: dict, headers: dict | None = None) -> None:
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(data)
 
-            def do_GET(self) -> None:
-                self._reply(200, {"data": [{"id": PROFILE, "task": "embed", "dimensions": 4}]})
-
             def do_POST(self) -> None:
                 texts = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["input"]
+                with endpoint._lock:
+                    throttled = endpoint.throttle > 0
+                    endpoint.throttle -= throttled
+                if throttled:
+                    self._reply(429, {"detail": "rate limited"}, {"Retry-After": "1"})
+                    return
                 with endpoint._lock:
                     endpoint.requests += 1
                     endpoint._active += 1
@@ -85,8 +90,8 @@ def endpoint(monkeypatch):
     state = _Endpoint(delay=0.2)
     server = ThreadingHTTPServer(("127.0.0.1", 0), state.handler())
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setenv("SMARTRAG_EMBED_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
-    monkeypatch.delenv("SMARTRAG_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("OUMIGO_EMBED_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+    monkeypatch.delenv("OUMIGO_EMBED_API_KEY", raising=False)
     try:
         yield state
     finally:
@@ -202,12 +207,34 @@ def test_a_failed_request_stops_the_sync_and_the_next_one_resumes(tmp_path, endp
     report = sync_kb(home, "legal")
     assert report.error and "HTTP 400" in report.error and "rejected" in report.error
     assert report.counts.added < 4
+    assert report.timings_ms["embed"] >= 200  # the failed request's 0.2 s included
 
     endpoint.fail = None
     again = sync_kb(home, "legal")
     assert again.error is None
     assert again.counts.added + again.counts.unchanged - 1 == 4  # image.png is unchanged
     assert again.counts.added == 4 - report.counts.added
+
+
+def test_parallel_sync_waits_out_rate_limits(tmp_path, endpoint, docs):
+    from smartrag.cli.main import app
+
+    home = Home(tmp_path / "home")
+    _new_kb(home, "legal", docs, 3)
+    endpoint.throttle = 2
+    events: list[dict] = []
+    report = sync_kb(home, "legal", progress=events.append)
+    assert report.error is None and report.counts.added == 4
+    assert report.rate_limit_waits == 2 == sum(e["event"] == "wait" for e in events)
+
+    _new_kb(home, "strict", docs, 3)
+    endpoint.throttle = 100
+    result = CliRunner().invoke(app, ["run", "--home", str(home.root), "--format", "json",
+                                      "kb", "sync", "--kb", "strict",
+                                      "--adapt-to-rate-limit=false"])
+    report_json = json.loads(result.stdout.splitlines()[-1])  # after the progress events
+    assert result.exit_code == 1 and "HTTP 429" in report_json["error"]
+    assert report_json["adapt_to_rate_limit"] is False
 
 
 def test_closing_with_requests_in_flight_stops_the_workers_at_once():
@@ -226,13 +253,8 @@ def test_closing_with_requests_in_flight_stops_the_workers_at_once():
 
 
 class _Sleeper:
-    profile = PROFILE
-
     def __init__(self, seconds: float) -> None:
         self.seconds = seconds
-
-    def check(self) -> int:
-        return 4
 
     def embed(self, texts, input_type):
         time.sleep(self.seconds)

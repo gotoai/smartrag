@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 
 import numpy as np
 
-from smartrag.embedding import Embedder, HttpEmbedder
+from smartrag.embedding.api import Embedder, open_embedder, resolve
 from smartrag.errors import ConfigError, EmbedderUnavailable, InvalidRequest
 from smartrag.index import fts_query
 from smartrag.kb.home import Home
@@ -58,7 +58,7 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
     filters = filters or SearchFilter()
     include = set(include)
     _validate(query, limit, page, cursor, max_per_doc, snippet_chars, include)
-    kb = open_kb(home, kb_id, check_profile=True)
+    kb = open_kb(home, kb_id, check_space=True)
     try:
         generation = kb.store.generation()
         bound = request_binding("kb-search", kb_id, query, filters.model_dump(mode="json"),
@@ -99,8 +99,8 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
             fallback_reason=fallback_reason, group_by=group_by, results=hits,
             page=offset // limit + 1,
             next_cursor=encode_cursor(end, bound, generation) if more else None,
-            index=IndexDescription(embedding_model=kb.store.meta("embedding_profile")
-                                   or kb.config.embedding.profile),
+            index=IndexDescription(embedding_model=kb.store.meta("model_profile_id")
+                                   or kb.config.embedding.model_profile_id),
             took_ms=int((time.monotonic() - started) * 1000))
     finally:
         kb.close()
@@ -144,18 +144,17 @@ def _keyword(kb: OpenKb, query: str, where: str, args: list[object], pool: int) 
 def _vector(kb: OpenKb, query: str, where: str, args: list[object], pool: int,
             filters: SearchFilter, embedder: Embedder | None) -> list[int]:
     assert kb.config.embedding is not None
-    profile = kb.config.embedding.profile
-    vectors = load_vectors(kb.store, kb.kb_dir / "cache", profile)
+    space = resolve(kb.config.embedding).space.key
+    vectors = load_vectors(kb.store, kb.kb_dir / "cache", space)
     if not vectors.rowids.size:
         return []
     cache = QueryVectorCache(kb.kb_dir / "cache")
-    q = cache.get(profile, query)
+    q = cache.get(space, query)
     if q is None:
         if embedder is None:
-            embedder = HttpEmbedder(kb.config.embedding)
-            embedder.check()  # learns whether the model takes input_type
+            embedder = open_embedder(kb.config.embedding)
         q = np.asarray(embedder.embed([query], "query")[0], dtype=np.float32)
-        cache.put(profile, query, q)
+        cache.put(space, query, q)
     if q.shape[0] != vectors.dimensions:
         raise ConfigError(f"the query vector has {q.shape[0]} dimensions but the index holds "
                           f"{vectors.dimensions}")

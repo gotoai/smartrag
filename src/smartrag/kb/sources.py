@@ -306,7 +306,7 @@ def add_source(home: Home, kb_id: str, source_id: str, location: str, *,
                              "use `kb ingest` to copy files into the kb")
     if not allow_missing and not path.exists():
         raise InvalidRequest(f"{path} does not exist; check the path, or pass "
-                             "--allow-missing for a share that is not mounted right now",
+                             "--allow-missing=true for a share that is not mounted right now",
                              {"path": str(path)})
 
     warnings: list[str] = []

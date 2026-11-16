@@ -40,7 +40,7 @@ def read_chunk(home: Home, kb_id: str, chunk_id: str, *, scope: ReadScope = "chu
         raise InvalidRequest("give a page or a cursor, not both")
     if page is not None and page < 1:
         raise InvalidRequest("page must be 1 or more")
-    kb = open_kb(home, kb_id, check_profile=False)
+    kb = open_kb(home, kb_id, check_space=False)
     try:
         select = _CHUNK_SQL.format(origin=kb.origin_column)
         anchor = kb.store.db.execute(select + "WHERE c.chunk_id = ?", (chunk_id,)).fetchone()

@@ -19,15 +19,18 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from smartrag.embedding.catalog import CUSTOM, catalog
+from smartrag.embedding.resolve import resolve
 from smartrag.errors import ConfigError, Conflict, InvalidRequest, NotFound
 from smartrag.kb.config import (
     CONFIG_FILE,
-    DEFAULT_EMBED_KEY_ENV,
-    DEFAULT_PROFILE,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
     ENV_REF,
     ID_PATTERN,
     MAX_DESCRIPTION,
@@ -43,6 +46,7 @@ from smartrag.kb.config import (
 )
 from smartrag.kb.lock import kb_lock, read_lock
 from smartrag.kb.models import (
+    EmbeddingInfo,
     EnvInfo,
     IndexInfo,
     KbCreated,
@@ -51,6 +55,7 @@ from smartrag.kb.models import (
     KbStatus,
     KbSummary,
     KbUpdated,
+    KbVerified,
     RemoteInfo,
 )
 from smartrag.kb.uris import uri_to_path
@@ -58,6 +63,8 @@ from smartrag.kb.uris import uri_to_path
 HOME_ENV = "SMARTRAG_HOME"
 DEFAULT_HOME = "~/.smartrag"
 INDEX_FILE = "index.db"
+REBUILD_FILE = f"{INDEX_FILE}.rebuild"
+"""A `kb reindex --rebuild` in progress, or stopped and waiting to be continued."""
 LOCAL_SUBDIRS = ("cache", "runs")
 
 
@@ -139,14 +146,15 @@ class Home:
     # --- kb new --------------------------------------------------------------------
 
     def new(self, kb_id: str, *, title: str | None = None, description: str = "",
-            profile: str = DEFAULT_PROFILE, remote: str | None = None,
+            provider_id: str = DEFAULT_PROVIDER, model_profile_id: str = DEFAULT_MODEL,
+            remote: str | None = None,
             remote_kb: str | None = None, token_env: str | None = None) -> KbCreated:
         kb_dir = self.kb_dir(kb_id)
         if kb_dir.exists():
             raise Conflict(f"kb {kb_id!r} already exists in {self.root}", {"kb": kb_id})
         description = _checked_description(description)
-        config = self._new_config(kb_id, title, description, profile, remote, remote_kb,
-                                  token_env)
+        config = self._new_config(kb_id, title, description, provider_id, model_profile_id,
+                                  remote, remote_kb, token_env)
 
         created_root = not self.root.exists()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -168,8 +176,8 @@ class Home:
                          config=str(kb_dir / CONFIG_FILE), next_steps=_next_steps(config))
 
     @staticmethod
-    def _new_config(kb_id: str, title: str | None, description: str, profile: str,
-                    remote: str | None, remote_kb: str | None,
+    def _new_config(kb_id: str, title: str | None, description: str, provider_id: str,
+                    model_profile_id: str, remote: str | None, remote_kb: str | None,
                     token_env: str | None) -> KbConfig:
         if token_env is not None and not ENV_REF.match(f"${{{token_env}}}"):
             raise InvalidRequest(f"--token-env must be an environment variable name, "
@@ -188,10 +196,29 @@ class Home:
             if remote_kb is not None or token_env is not None:
                 raise InvalidRequest("--remote-kb and --token-env apply only with --remote")
             return KbConfig(id=kb_id, title=title or kb_id, description=description,
-                            embedding=EmbeddingConfig(profile=profile,
-                                                      api_key=f"${{{DEFAULT_EMBED_KEY_ENV}}}"))
+                            embedding=_new_embedding(provider_id, model_profile_id))
+        except ConfigError as exc:
+            raise InvalidRequest(exc.message, {"kb": kb_id}) from exc
         except ValidationError as exc:
             raise InvalidRequest(describe_validation_error(exc), {"kb": kb_id}) from exc
+
+    # --- kb verify -----------------------------------------------------------------
+
+    def verify(self, kb_id: str) -> KbVerified:
+        """One short test embedding through the kb's provider and model: checks the URL,
+        the key, the model and the vector size (design memo §3.2)."""
+        from smartrag.embedding.api import open_embedder
+
+        config = self.load(kb_id)
+        if config.kind == "remote" or config.embedding is None:
+            raise InvalidRequest(f"kb {kb_id!r} is remote: its server embeds", {"kb": kb_id})
+        embedder = open_embedder(config.embedding, timeout=30.0, attempts=1)
+        started = time.monotonic()
+        embedder.verify()
+        return KbVerified(kb=kb_id, provider_id=embedder.spec.provider_id,
+                          model_profile_id=embedder.spec.model_profile_id,
+                          vector_space=embedder.spec.space.key, url=embedder.url,
+                          took_ms=int((time.monotonic() - started) * 1000))
 
     # --- kb status -----------------------------------------------------------------
 
@@ -225,7 +252,10 @@ class Home:
             return status
 
         assert config.embedding is not None
-        status.embedding_profile = config.embedding.profile
+        spec = resolve(config.embedding)
+        status.embedding = EmbeddingInfo(
+            provider_id=spec.provider_id, model_profile_id=spec.model_profile_id,
+            model_canonical_name=spec.model_canonical_name, vector_space=spec.space.key)
         sink = self.sink_dir(config)
         if sink.is_dir():
             status.sink_files, status.sink_bytes = tree_stats(sink)
@@ -236,6 +266,10 @@ class Home:
                                  bytes=index.stat().st_size if index.is_file() else None)
         if not index.is_file():
             warnings.append("no index yet: run `smartrag run kb sync`")
+        if (kb_dir / REBUILD_FILE).is_file() and (holder is None or holder.stale):
+            warnings.append(f"a stopped `kb reindex --rebuild` left a partial index "
+                            f"({REBUILD_FILE}); run it again to continue, or delete the "
+                            "file to drop it")
         else:
             _index_status(status.index, config, warnings)
         if not config.sources:
@@ -302,6 +336,19 @@ class Home:
                          kept_sink=str(sink) if sink is not None and not inside else None)
 
 
+def _new_embedding(provider_id: str, model_profile_id: str) -> EmbeddingConfig:
+    """A new kb's embedding section. Each variable the provider reads is written out, so
+    the file shows what to set; a cloud provider's fixed URL is not."""
+    provider = catalog().get(provider_id)
+    if provider is None or provider_id == CUSTOM:
+        # `custom` needs more than an id: write it by hand. An unknown id fails validation.
+        return EmbeddingConfig(provider_id=provider_id, model_profile_id=model_profile_id)
+    return EmbeddingConfig(
+        provider_id=provider_id, model_profile_id=model_profile_id,
+        base_url=None if provider.fixed_url else f"${{{provider.base_url_env}}}",
+        api_key=f"${{{provider.api_key_env}}}" if provider.api_key_env else None)
+
+
 def _checked_description(text: str) -> str:
     try:
         return check_description(text)
@@ -341,11 +388,13 @@ def _index_status(info: IndexInfo, config: KbConfig, warnings: list[str]) -> Non
     finally:
         store.close()
     info.documents, info.ok, info.chunks = stats.documents, stats.ok, stats.chunks
-    info.skipped, info.failed, info.profile = stats.skipped, stats.failed, stats.profile
+    info.skipped, info.failed = stats.skipped, stats.failed
+    info.vector_space = stats.vector_space
     assert config.embedding is not None
-    if stats.profile and stats.profile != config.embedding.profile:
-        warnings.append(f"the index holds vectors from {stats.profile!r} but the config "
-                        f"says {config.embedding.profile!r}")
+    space = resolve(config.embedding).space.key
+    if stats.vector_space and stats.vector_space != space:
+        warnings.append(f"the index holds vectors in {stats.vector_space!r} but the config's "
+                        f"model gives {space!r}: run `kb reindex --rebuild`")
     if stats.skipped or stats.failed:
         warnings.append(f"{stats.skipped} documents skipped and {stats.failed} failed; "
                         "the last sync report in runs/ lists them")

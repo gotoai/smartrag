@@ -32,6 +32,17 @@ class OutputFormat(str, Enum):
     json = "json"
 
 
+class TrueFalse(str, Enum):
+    """A setting given as `--name=true|false` (any case). Typer makes every `bool` option
+    a bare switch, so on/off settings take this type instead."""
+
+    true = "true"
+    false = "false"
+
+    def __bool__(self) -> bool:
+        return self is TrueFalse.true
+
+
 @dataclass
 class RunState:
     home: Home

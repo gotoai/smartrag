@@ -11,7 +11,7 @@ The sink is the kb's own source. A copy lives at `sink/<content-hash>/<original 
   folder, `source add` it instead.
 
 Only supported file types are copied, so the sink never accumulates files that sync can
-only record as skipped. A folder needs `--recursive`: without it the command refuses before
+only record as skipped. A folder needs `--recursive=true`: without it the command refuses before
 copying anything, rather than guess.
 """
 
@@ -29,7 +29,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from smartrag.chunking import chunk_units
-from smartrag.embedding import Embedder
+from smartrag.embedding.api import Embedder
 from smartrag.errors import InvalidRequest, SmartRAGError
 from smartrag.extract.units import extract
 from smartrag.kb.config import SINK_ID
@@ -87,7 +87,7 @@ def _collect(paths: list[str], recursive: bool, kb_dir: Path,
             raise InvalidRequest(f"{path} is inside the kb's own folder")
         if path.is_dir():
             if not recursive:
-                raise InvalidRequest(f"{path} is a folder: pass --recursive to ingest the "
+                raise InvalidRequest(f"{path} is a folder: pass --recursive=true to ingest the "
                                      "files in it, or name the files")
             target = SyncTarget("ingest", path_to_uri(path), path, True, [], [])
             listing = list_files(target, {home_root})
@@ -104,7 +104,8 @@ def _collect(paths: list[str], recursive: bool, kb_dir: Path,
 def ingest_files(home: Home, kb_id: str, paths: list[str], *, recursive: bool = False,
                  dry_run: bool = False, embedder: Embedder | None = None,
                  progress: Callable[[dict[str, Any]], None] | None = None,
-                 embedding_parallelism: int | None = None) -> IngestReport:
+                 embedding_parallelism: int | None = None,
+                 adapt_to_rate_limit: bool = True) -> IngestReport:
     from smartrag.kb.sync import sync_kb
 
     config = home.load(kb_id)
@@ -180,7 +181,8 @@ def ingest_files(home: Home, kb_id: str, paths: list[str], *, recursive: bool = 
             report.copied += 1
             report.bytes_copied += size
     report.sync = sync_kb(home, kb_id, source=SINK_ID, embedder=embedder, progress=progress,
-                          operation="ingest", embedding_parallelism=embedding_parallelism)
+                          operation="ingest", embedding_parallelism=embedding_parallelism,
+                          adapt_to_rate_limit=adapt_to_rate_limit)
     return report
 
 

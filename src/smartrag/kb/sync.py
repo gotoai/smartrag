@@ -24,6 +24,11 @@ processes, up to that many at once, while this process goes on extracting the ne
 a document is written when all its requests are back, so documents finish out of listing
 order. Everything else stays in this process, which alone touches the index.
 
+`adapt_to_rate_limit` (on by default) waits out rate limits instead of stopping: requests
+back off and are split when too big for a per-minute limit (`embedding.transport`), fewer
+are kept in flight while the provider pushes back, and every wait is reported as a
+`wait` progress event and counted in the report.
+
 An interrupted sync loses at most the documents in progress; running it again resumes.
 """
 
@@ -40,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from smartrag.chunking import TOKEN_ESTIMATOR, Chunk, chunk_units
-from smartrag.embedding import Embedder, HttpEmbedder
+from smartrag.embedding.api import Embedder, EmbeddingSpec, open_embedder, resolve
 from smartrag.errors import ConfigError, EmbedderUnavailable, InvalidRequest, SmartRAGError
 from smartrag.extract.tabular import ExtractError
 from smartrag.extract.units import EXTRACTOR_VERSION, Extracted, extract
@@ -116,13 +121,17 @@ class _Run:
         self.donor = donor
         """Another index whose vectors may be reused (a rebuild's old index)."""
         self.version = report.pipeline_version
-        self.profile = report.profile
+        self.space = report.vector_space
         self.timings = {"list": 0, "extract": 0, "embed": 0, "write": 0}
         self.pool: EmbedPool | None = None
+        adapting = embedder is not None and report.adapt_to_rate_limit
         if embedder is not None and report.embedding_parallelism > 1:
-            self.pool = EmbedPool(embedder, report.embedding_parallelism)
+            self.pool = EmbedPool(embedder, report.embedding_parallelism,
+                                  on_wait=self._on_wait if adapting else None)
+        elif adapting and hasattr(embedder, "on_wait"):
+            embedder.on_wait = self._on_wait  # type: ignore[union-attr]
         self.dimensions: int | None = None
-        """The length of the vectors the workers returned."""
+        """The length of the vectors returned so far."""
         self._done = 0
         self._total = 0
 
@@ -131,6 +140,11 @@ class _Run:
     def _emit(self, **event: Any) -> None:
         if self.progress is not None:
             self.progress(event)
+
+    def _on_wait(self, seconds: float, kind: str) -> None:
+        self.report.rate_limit_waits += 1
+        self.report.rate_limit_wait_ms += int(seconds * 1000)
+        self._emit(event="wait", seconds=seconds, kind=kind)
 
     def _issue(self, source: str, rel: str, status: str, reason: str) -> None:
         self.report.issues_total += 1
@@ -286,10 +300,10 @@ class _Run:
             return status, len(rows)
 
         started = time.monotonic()
-        known = self.store.vectors_for((r.text_hash for r in rows), self.profile)
+        known = self.store.vectors_for((r.text_hash for r in rows), self.space)
         if self.donor is not None:
             missing = [r.text_hash for r in rows if r.text_hash not in known]
-            known.update(self.donor.vectors_for(missing, self.profile))
+            known.update(self.donor.vectors_for(missing, self.space))
         needed = [r for r in rows if r.text_hash not in known]
         for row in rows:
             if row.text_hash in known:
@@ -303,10 +317,12 @@ class _Run:
                              needed, needed_texts)
                 return None
             assert self.embedder is not None
-            vectors = self.embedder.embed(needed_texts, "document")
-            for row, vector in zip(needed, vectors):
-                row.embedding = vector
-        self.timings["embed"] += int((time.monotonic() - started) * 1000)
+            try:
+                self._take(needed, self.embedder.embed(needed_texts, "document"))
+            finally:  # a failed request's time counts too
+                self.timings["embed"] += int((time.monotonic() - started) * 1000)
+        else:
+            self.timings["embed"] += int((time.monotonic() - started) * 1000)
         self._write(_Pending(document, text, rows, status, len(needed)))
         return status, len(rows)
 
@@ -336,7 +352,7 @@ class _Run:
         starts = range(0, len(needed), size)
         pending.requests = len(starts)  # all of them, before any can come back
         for start in starts:
-            while self.pool.in_flight >= self.pool.parallelism:
+            while self.pool.in_flight >= self.pool.limit:
                 self._collect(block=True)
             self.pool.submit(texts[start:start + size], (pending, needed[start:start + size]))
         self._collect(block=False)
@@ -345,23 +361,32 @@ class _Run:
         """Take in the requests that have come back, and write each document whose
         requests are all back."""
         assert self.pool is not None
-        for (pending, rows), vectors, took_ms in self.pool.wait(block=block):
+        try:
+            finished = self.pool.wait(block=block)
+        except EmbedderUnavailable as exc:  # a failed request's time counts too
+            self.timings["embed"] += int(exc.details.get("took_ms", 0))
+            raise
+        for (pending, rows), vectors, took_ms in finished:
             self.timings["embed"] += took_ms
-            if len(vectors) != len(rows):
-                raise EmbedderUnavailable(f"embedding endpoint returned {len(vectors)} "
-                                          f"vectors for {len(rows)} inputs")
-            for row, vector in zip(rows, vectors):
-                if self.dimensions is None:
-                    self.dimensions = len(vector)
-                elif len(vector) != self.dimensions:
-                    raise EmbedderUnavailable(f"embedding endpoint returned {len(vector)} "
-                                              f"dimensions, expected {self.dimensions}")
-                row.embedding = vector
+            self._take(rows, vectors)
             pending.requests -= 1
             if not pending.requests:
                 self._write(pending)
                 self._document_done(pending.document.source_id, pending.document.rel_path,
                                     pending.status, len(pending.rows))
+
+    def _take(self, rows: list[ChunkRow], vectors: list[list[float]]) -> None:
+        """Give each row its vector, after checking they all have one length."""
+        if len(vectors) != len(rows):
+            raise EmbedderUnavailable(f"embedding endpoint returned {len(vectors)} "
+                                      f"vectors for {len(rows)} inputs")
+        for row, vector in zip(rows, vectors):
+            if self.dimensions is None:
+                self.dimensions = len(vector)
+            elif len(vector) != self.dimensions:
+                raise EmbedderUnavailable(f"embedding endpoint returned {len(vector)} "
+                                          f"dimensions, expected {self.dimensions}")
+            row.embedding = vector
 
     def _chunk_rows(self, doc_id: str, searchable_path: str,
                     chunks: list[Chunk]) -> list[ChunkRow]:
@@ -372,7 +397,7 @@ class _Run:
         path_text = lexify(_PATH_SEPARATORS.sub(" ", searchable_path))
         for chunk in chunks:
             embed_text = chunk.embed_text()
-            text_hash = _sha256(f"{self.profile}\0{embed_text}")[:32]
+            text_hash = _sha256(f"{self.space}\0{embed_text}")[:32]
             seen = occurrences.get(text_hash, 0)
             occurrences[text_hash] = seen + 1
             chunk_id = f"{doc_id}:{text_hash[:16]}" + (f"-{seen}" if seen else "")
@@ -381,7 +406,7 @@ class _Run:
                 chunk_id=chunk_id, ordinal=chunk.ordinal, start=chunk.start, end=chunk.end,
                 prefix=chunk.prefix, heading_path=chunk.heading_path, page=chunk.page,
                 page_end=chunk.page_end, location=chunk.location, tokens=chunk.tokens,
-                text_hash=text_hash, profile=self.profile, embedding=None,
+                text_hash=text_hash, vector_space=self.space, embedding=None,
                 fts_heading=lexify(" ".join(chunk.heading_path)), fts_body=lexify(body),
                 fts_path=path_text))
         return rows
@@ -404,14 +429,16 @@ class _Run:
 def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool = False,
             force: bool = False, only_stale: bool = False, embedder: Embedder | None = None,
             progress: Progress | None = None, operation: str | None = None,
-            embedding_parallelism: int | None = None) -> SyncReport:
+            embedding_parallelism: int | None = None,
+            adapt_to_rate_limit: bool = True) -> SyncReport:
     """Sync a kb. `only_stale` (for `kb reindex --refresh-stale-only`) re-processes only documents built
     by an older pipeline version: no new files, no removals. `operation` labels the run's
     report when another command runs the sync (`kb ingest`). `embedding_parallelism`
-    overrides the config's `embedding.parallelism` for this run."""
+    overrides the config's `embedding.parallelism` for this run. `adapt_to_rate_limit`
+    waits out rate limits instead of stopping the run."""
     config, targets, report = _prepare(home, kb_id, source, dry_run,
                                        operation or ("reindex-stale" if only_stale else "sync"),
-                                       embedding_parallelism)
+                                       embedding_parallelism, adapt_to_rate_limit)
     kb_dir = home.kb_dir(kb_id)
     index_path = kb_dir / INDEX_FILE
     started = time.monotonic()
@@ -431,7 +458,7 @@ def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool 
 
 
 def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool, operation: str,
-             embedding_parallelism: int | None = None,
+             embedding_parallelism: int | None = None, adapt_to_rate_limit: bool = True,
              ) -> tuple[KbConfig, list[SyncTarget], SyncReport]:
     if embedding_parallelism is not None and embedding_parallelism < 1:
         raise InvalidRequest("the embedding parallelism must be at least 1",
@@ -441,11 +468,14 @@ def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool, operatio
         raise InvalidRequest(f"kb {kb_id!r} is remote: its sources are managed by its server",
                              {"kb": kb_id})
     assert config.embedding is not None
+    spec = resolve(config.embedding)
     report = SyncReport(kb=kb_id, operation=operation, dry_run=dry_run,  # type: ignore[arg-type]
-                        started_at=_now(), profile=config.embedding.profile,
+                        started_at=_now(), provider_id=spec.provider_id,
+                        model_profile_id=spec.model_profile_id, vector_space=spec.space.key,
                         pipeline_version=pipeline_version(config),
                         embedding_parallelism=embedding_parallelism
-                        or config.embedding.parallelism)
+                        or config.embedding.parallelism,
+                        adapt_to_rate_limit=adapt_to_rate_limit)
     return config, sync_targets(home, config, source), report
 
 
@@ -458,22 +488,19 @@ def sync_into(home: Home, config: KbConfig, index_path: Path, report: SyncReport
     `donor` lends vectors (a rebuild's old index); `first_generation` starts a new
     index's generation counter after the one it replaces."""
     assert config.embedding is not None
+    spec = resolve(config.embedding)
     if embedder is None:
-        embedder = HttpEmbedder(config.embedding)
-    dimensions = embedder.check()
+        embedder = open_embedder(config.embedding, adaptive=report.adapt_to_rate_limit)
     home.sink_dir(config).mkdir(mode=0o700, parents=True, exist_ok=True)
     store = SqliteIndex.open(index_path)
     try:
         if first_generation is not None and store.generation() < first_generation:
             with store.db:
                 store.set_meta("generation", str(first_generation))
-        _check_profile(store, report.profile, dimensions)
+        _check_space(store, spec)
         run = _Run(home, config, store, embedder, report, force, progress,
                    only_stale=only_stale, donor=donor)
         _execute(run, targets, source)
-        dims = dimensions or getattr(embedder, "dimensions", None) or run.dimensions
-        if dims and store.meta("dimensions") is None:
-            store.set_meta("dimensions", str(dims))
         store.set_meta("last_sync_at", _now())
         store.db.commit()
         store.collect_garbage()
@@ -486,21 +513,26 @@ def sync_into(home: Home, config: KbConfig, index_path: Path, report: SyncReport
         store.close()
 
 
-def _check_profile(store: SqliteIndex, profile: str, dimensions: int | None) -> None:
-    held = store.meta("embedding_profile")
-    if held is not None and held != profile:
+def _check_space(store: SqliteIndex, spec: EmbeddingSpec) -> None:
+    """Refuse to mix vector spaces (design memo §3.2); then record the space, and the
+    provider and model now filling it, which may change within the space."""
+    held = store.meta("vector_space")
+    if held is not None and held != spec.space.key:
         raise ConfigError(
-            f"the index holds vectors from {held!r} but the config says {profile!r}; "
-            "vectors from different models cannot be mixed. Restore the profile, or rebuild "
-            "the index with `smartrag run kb reindex --kb <id> --rebuild`.",
-            {"index_profile": held, "config_profile": profile})
-    held_dims = store.meta("dimensions")
-    if held_dims and dimensions and int(held_dims) != dimensions:
-        raise ConfigError(f"the index holds {held_dims}-dimensional vectors but {profile!r} "
-                          f"now returns {dimensions}", {"profile": profile})
-    if held is None:
-        store.set_meta("embedding_profile", profile)
-        store.db.commit()
+            f"the index holds vectors in the space {held!r}, but {spec.model_profile_id!r} "
+            f"gives {spec.space.key!r}; vectors from different spaces cannot be mixed. "
+            "Go back to a model in the index's space, or rebuild the index with "
+            "`smartrag run kb reindex --kb <id> --rebuild`.",
+            {"index_space": held, "config_space": spec.space.key})
+    with store.db:
+        for key, value in (("vector_space", spec.space.key),
+                           ("model_embedding_compatibility_id", spec.space.compatibility_id),
+                           ("dimensions", str(spec.space.dimensions)),
+                           ("marking_id", spec.space.marking_id),
+                           ("provider_id", spec.provider_id),
+                           ("model_profile_id", spec.model_profile_id),
+                           ("model_canonical_name", spec.model_canonical_name)):
+            store.set_meta(key, value)
 
 
 def _execute(run: _Run, targets: list[SyncTarget], source: str | None) -> None:
