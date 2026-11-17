@@ -10,8 +10,9 @@ The sink is the kb's own source. A copy lives at `sink/<content-hash>/<original 
 * **A copy is a snapshot.** Later edits to the original are not picked up; to follow a
   folder, `source add` it instead.
 
-Only supported file types are copied, so the sink never accumulates files that sync can
-only record as skipped. A folder needs `--recursive=true`: without it the command refuses before
+Only files sync would extract are copied — a supported type, or text by its bytes, and
+not covered by a built-in exclude such as `.env` — so the sink never accumulates files
+that sync can only record as skipped or ignore. A folder needs `--recursive=true`: without it the command refuses before
 copying anything, rather than guess.
 """
 
@@ -36,7 +37,13 @@ from smartrag.kb.config import SINK_ID
 from smartrag.kb.home import Home
 from smartrag.kb.lock import kb_lock
 from smartrag.kb.models import SyncReport
-from smartrag.kb.sources import SINK_SIDECAR, SUPPORTED_EXTENSIONS, SyncTarget, list_files
+from smartrag.kb.sources import (
+    SINK_SIDECAR,
+    SyncTarget,
+    builtin_excluded,
+    list_files,
+    unsupported_reason,
+)
 from smartrag.kb.uris import path_to_uri
 
 _HASH_CHARS = 32
@@ -95,7 +102,9 @@ def _collect(paths: list[str], recursive: bool, kb_dir: Path,
                 raise InvalidRequest(listing.problem or f"{path} cannot be read")
             found += [(f.path, None) for f in listing.files]
         elif path.is_file():
-            found.append((path, None))
+            excluded = builtin_excluded(path.name)
+            found.append((path, "excluded by a built-in rule (secrets, generated files)"
+                          if excluded else None))
         else:
             found.append((path, "does not exist"))
     return found
@@ -128,11 +137,11 @@ def ingest_files(home: Home, kb_id: str, paths: list[str], *, recursive: bool = 
         if problem:
             skip(path, problem)
             continue
-        ext = path.suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            skip(path, f"unsupported file type {ext or '(no extension)'}")
-            continue
         try:
+            unsupported = unsupported_reason(path)
+            if unsupported:
+                skip(path, unsupported)
+                continue
             digest = _file_hash(path)
             size = path.stat().st_size
         except OSError as exc:

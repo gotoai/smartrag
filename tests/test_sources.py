@@ -172,6 +172,34 @@ def test_tabular_files_are_supported(home, tmp_path):
     assert report.files_matched == 6 and report.supported_files == 6
 
 
+def test_text_files_are_found_by_their_bytes(home, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    (root / "Makefile").write_text("all:\n\techo hi\n", encoding="utf-8")
+    (root / "notes.rtf").write_text("{\\rtf1 x}", encoding="utf-8")
+    (root / "blob.dat").write_bytes(b"\x00\x01" * 50)
+    (root / "logo.svg").write_text("<svg/>", encoding="utf-8")
+    add_source(home, "legal", "repo", str(root))
+    report = src.test_source(home, "legal", "repo")
+    assert report.supported_files == 3 and report.unsupported_files == 2
+    assert any("cannot extract (.dat, .svg)" in p for p in report.problems)
+
+
+def test_secrets_and_generated_files_are_always_excluded(home, tmp_path):
+    root = tmp_path / "project"
+    for rel in (".env", ".env.local", "certs/server.pem", ".ssh/id_rsa", ".aws/credentials",
+                "package-lock.json", "web/app.min.js", ".venv/lib/site.py", "Cargo.lock",
+                "README.md"):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    add_source(home, "legal", "project", str(root))
+    report = src.test_source(home, "legal", "project")
+    assert report.files_matched == 1 and report.sample == ["README.md"]
+    assert src.builtin_excluded(".env") and not src.builtin_excluded("env.md")
+
+
 def test_test_missing_root_is_not_ok(home, tmp_path):
     add_source(home, "legal", "nas", str(tmp_path / "gone"), allow_missing=True)
     report = src.test_source(home, "legal", "nas")

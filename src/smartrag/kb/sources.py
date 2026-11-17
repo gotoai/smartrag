@@ -1,8 +1,9 @@
 """A kb's sources: the registered roots `sync` follows, plus the reserved sink.
 
 `test` walks a source the way a sync would — same recursion, same include and exclude
-rules, same built-in excludes — and reports what it would see, without reading any
-file's contents and without touching the index.
+rules, same built-in excludes — and reports what it would see, without touching the index
+and without reading file contents beyond the first 8 KiB of a file whose extension names
+no extractor (enough to tell whether it is text).
 
 Patterns are globs over the path relative to the source root, with `/` as separator:
 `*` stays within one folder, `**/` spans any number of folders (including none), `?` is
@@ -21,7 +22,8 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from smartrag.errors import Conflict, InvalidRequest, NotFound, Unsupported
-from smartrag.extract.tabular import TABULAR_EXTENSIONS
+from smartrag.extract.sniff import is_text_file
+from smartrag.extract.units import EXTRACTOR_EXTENSIONS
 from smartrag.kb.config import (
     SINK_ID,
     KbConfig,
@@ -41,8 +43,8 @@ from smartrag.kb.models import (
 )
 from smartrag.kb.uris import location_to_uri, path_to_uri, uri_to_path
 
-#: Always skipped, whatever a source's own patterns say: editor and OS litter, and
-#: folders that are never documents.
+#: Always skipped, whatever a source's own patterns say: editor and OS litter, folders
+#: that are never documents, generated files, and secrets.
 BUILTIN_EXCLUDE = [
     "**/~$*",            # Office lock files
     "**/.~lock.*#",      # LibreOffice lock files
@@ -54,20 +56,59 @@ BUILTIN_EXCLUDE = [
     "**/.svn/**",
     "**/node_modules/**",
     "**/__pycache__/**",
+    # Tool folders and generated files: text a sniff would accept, none of it knowledge.
+    "**/.venv/**",
+    "**/.tox/**",
+    "**/.mypy_cache/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/*.lock",         # yarn, Cargo, Poetry, uv, Gemfile, Composer
+    "**/go.sum",
+    "**/*.min.js",
+    "**/*.min.css",
+    # Secrets: never sent to an embedding provider or shown to an agent.
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/.netrc",
+    "**/.git-credentials",
+    "**/.npmrc",
+    "**/.pypirc",
+    "**/.ssh/**",
+    "**/.gnupg/**",
+    "**/.aws/**",
+    "**/.kube/**",
+    "**/.docker/**",
 ]
 
-#: What v1 extracts text from (design memo §3.4). Tabular files — CSV, TSV and Excel —
-#: are converted to TSV blocks by `smartrag.extract.tabular` and chunked by rows.
-SUPPORTED_EXTENSIONS = frozenset({
-    ".txt", ".text", ".md", ".markdown", ".html", ".htm", ".xhtml",
-    ".pdf", ".docx", ".pptx",
-}) | TABULAR_EXTENSIONS
+#: Extensions with an extractor of their own (design memo §3.4). A file with any other
+#: extension, or none, is extracted as plain text when its bytes are text.
+SUPPORTED_EXTENSIONS = EXTRACTOR_EXTENSIONS
 
 _MAX_ERRORS_LISTED = 20
 
 #: Written by `kb ingest` beside each copy in the sink: where the copy came from. Never a
 #: document itself.
 SINK_SIDECAR = ".origin.json"
+
+
+def builtin_excluded(rel: str) -> bool:
+    """Whether a built-in exclude covers the path (relative, `/`-separated)."""
+    return any(compile_glob(pattern).match(rel) for pattern in BUILTIN_EXCLUDE)
+
+
+def unsupported_reason(path: Path) -> str | None:
+    """Why a sync would not extract the file, or None if it would. Reads at most the first
+    8 KiB, and only of a file whose extension names no extractor. Raises `OSError`."""
+    ext = path.suffix.lower()
+    if ext in SUPPORTED_EXTENSIONS or is_text_file(path):
+        return None
+    return f"unsupported file type {ext or '(no extension)'}"
 
 
 def compile_glob(pattern: str) -> re.Pattern[str]:
@@ -411,7 +452,7 @@ def test_source(home: Home, kb_id: str, source_id: str, *, sample: int = 10) -> 
     if report.ok and report.files_matched == 0:
         report.problems.append("no files match: check the include and exclude patterns")
     if report.unsupported_files:
-        kinds = sorted(ext for ext in report.by_extension if ext not in SUPPORTED_EXTENSIONS)
+        kinds = sorted(report._unsupported_kinds)
         report.problems.append(f"{_count(report.unsupported_files, 'file')} of types v1 "
                                f"cannot extract ({', '.join(kinds)}); a sync will skip them")
     report.took_ms = int((time.monotonic() - started) * 1000)
@@ -449,14 +490,20 @@ def _consider(report: SourceTestReport, matcher: _Matcher, rel: str, path: Path,
         except OSError as exc:
             _error(report, rel, exc)
             return
+    try:
+        unsupported = unsupported_reason(path) is not None
+    except OSError as exc:
+        _error(report, rel, exc)
+        return
     ext = path.suffix.lower() or "(none)"
     report.files_matched += 1
     report.bytes_matched += size
     report.by_extension[ext] = report.by_extension.get(ext, 0) + 1
-    if ext in SUPPORTED_EXTENSIONS:
-        report.supported_files += 1
-    else:
+    if unsupported:
         report.unsupported_files += 1
+        report._unsupported_kinds.add(ext)
+    else:
+        report.supported_files += 1
     if len(report.sample) < sample:
         report.sample.append(rel)
 

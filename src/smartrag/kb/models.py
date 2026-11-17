@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from smartrag.kb.lock import LockHolder
 
@@ -176,7 +176,8 @@ class PathError(BaseModel):
 
 
 class SourceTestReport(BaseModel):
-    """What a sync of this source would see, without reading any file's contents."""
+    """What a sync of this source would see. File contents are not read, except the first
+    8 KiB of a file whose extension names no extractor, to tell whether it is text."""
 
     kb: str
     source: str
@@ -199,6 +200,7 @@ class SourceTestReport(BaseModel):
     sample: list[str] = Field(default_factory=list)
     problems: list[str] = Field(default_factory=list)
     took_ms: int = 0
+    _unsupported_kinds: set[str] = PrivateAttr(default_factory=set)
 
 
 class SyncCounts(BaseModel):

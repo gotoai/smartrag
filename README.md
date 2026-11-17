@@ -4,8 +4,8 @@ A knowledge source any agent can use. **Search returns evidence** (snippets, sta
 citations); the agent, or a person at the search box, writes the answer.
 
 Status: **skeleton** (0.0.x). Knowledge bases and their sources are managed with
-`smartrag run kb|source`, and `kb sync` builds the SQLite index (text, Markdown, HTML, PDF,
-DOCX, PPTX, CSV/TSV/Excel; BM25 over character bigrams; vectors from a catalog of embedding
+`smartrag run kb|source`, and `kb sync` builds the SQLite index (PDF, Office, HTML, Markdown
+and other markup, RTF, e-mail, JSON/YAML/XML, CSV/TSV/Excel, and any other text file; BM25 over character bigrams; vectors from a catalog of embedding
 providers). The query-plane Web API is complete as a contract and runs on an
 in-memory demo engine; it does not yet route by kb. `kb search` and `kb read` query the index,
 and `smartrag mcp` serves them to agents. Still to come: the kb-aware Web API,
@@ -62,8 +62,12 @@ smartrag run --format json kb list                      # JSON for programs, err
 - The home is `--home` > `$SMARTRAG_HOME` > `~/.smartrag`; `--kb` is always required.
 - Secrets appear in `config.yaml` only as `${ENV_VAR}` references; a literal value is rejected.
 - Commands edit `config.yaml` in place: your comments, key order and quoting are kept.
-- Supported file types: text, Markdown, HTML, PDF, DOCX, PPTX, and tables (CSV, TSV, XLSX,
-  XLSM, XLS, XLSB), which are converted to TSV internally. `source test` lists the rest.
+- Supported file types: PDF, DOCX/DOCM, PPTX/PPTM, HTML, Markdown, reStructuredText,
+  AsciiDoc, RTF, e-mail (`.eml`), JSON, JSON Lines, YAML and XML (flattened to `path: value`
+  records), plain text and logs, and tables (CSV, TSV, XLSX, XLSM, XLS, XLSB), which are
+  converted to TSV internally. Any other file is indexed as plain text when its first 8 KiB
+  are text, so source code and configuration files need no list. Secrets (`.env`, keys,
+  `.ssh`), tool folders and lock files are always excluded. `source test` lists the rest.
 
 ## Extraction
 

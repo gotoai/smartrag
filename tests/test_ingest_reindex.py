@@ -101,6 +101,14 @@ def test_folders_need_recursive_and_skip_what_cannot_be_indexed(home, originals,
     assert {r[3] for r in _documents(home)} == {"ok"}
 
 
+def test_secrets_named_directly_are_not_copied(home, tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text("API_KEY=abc\n", encoding="utf-8")
+    report = ingest_files(home, "legal", [str(secret)], embedder=Embedder())
+    assert report.copied == 0 and report.files[0].status == "skipped"
+    assert "built-in rule" in (report.files[0].reason or "")
+
+
 def test_dry_run_copies_nothing(home, originals):
     report = ingest_files(home, "legal", [str(originals)], recursive=True, dry_run=True)
     assert {i.status for i in report.files} == {"would_copy", "skipped"}

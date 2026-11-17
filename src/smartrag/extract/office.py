@@ -1,4 +1,9 @@
-"""Word (.docx) and PowerPoint (.pptx).
+"""Word (.docx, .docm) and PowerPoint (.pptx, .pptm).
+
+Macro-enabled files are read like the others; their macros are never run.
+python-pptx opens `.pptm` as it is. python-docx refuses `.docm` by its content type, so
+the package's `[Content_Types].xml` is rewritten in memory to call the main part a plain
+document; nothing else in the file differs.
 
 DOCX: body paragraphs and tables in document order. Paragraph styles named `Heading N`,
 `見出し N` or `Title` become headings. A table's first row is its header, repeated at
@@ -11,6 +16,7 @@ tables become rows; speaker notes follow the slide's own text.
 
 from __future__ import annotations
 
+import io
 import re
 import zipfile
 from pathlib import Path
@@ -36,13 +42,31 @@ def _style_level(style_name: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+_DOCM_MAIN = b"application/vnd.ms-word.document.macroEnabled.main+xml"
+_DOCX_MAIN = b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+
+
+def _as_docx(path: Path) -> io.BytesIO:
+    """A `.docm` package with its main part's content type changed to a `.docx` one."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as copy:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                data = data.replace(_DOCM_MAIN, _DOCX_MAIN)
+            copy.writestr(item, data)
+    out.seek(0)
+    return out
+
+
 def extract_docx(path: Path) -> Extracted:
     import docx
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
     try:
-        document = docx.Document(str(path))
+        source = _as_docx(path) if path.suffix.lower() == ".docm" else str(path)
+        document = docx.Document(source)
     except (zipfile.BadZipFile, KeyError, ValueError) as exc:
         raise _open_error(path, exc) from exc
 

@@ -5,7 +5,8 @@ paragraph (a PDF text box, a DOCX paragraph, a slide's text frame), a table's he
 row, or one table row in TSV. The chunker packs units into chunks; the document's
 canonical text is the units joined by newlines.
 
-`extract(path)` dispatches on the file's extension. `EXTRACTOR_VERSION` goes into the
+`extract(path)` dispatches on the file's extension, and reads a file whose extension names
+no extractor as plain text when its bytes are text. `EXTRACTOR_VERSION` goes into the
 pipeline version: bump it whenever an extractor's output changes, and `kb reindex
 --refresh-stale-only` will re-extract what an older extractor produced.
 """
@@ -18,8 +19,10 @@ from pathlib import Path
 from typing import Literal
 
 from smartrag.errors import Unsupported
+from smartrag.extract.tabular import TABULAR_EXTENSIONS
 
-EXTRACTOR_VERSION = "3"  # 2: PDF lines joined; 3: deterministic PDF reading order
+EXTRACTOR_VERSION = "4"  # 2: PDF lines joined; 3: deterministic PDF reading order;
+#                          4: more file types, and text files found by their bytes
 
 UnitKind = Literal["heading", "text", "header", "row"]
 
@@ -80,18 +83,33 @@ def heading_level(line: str) -> int:
 
 # --- dispatch ----------------------------------------------------------------------
 
-TEXT_EXTENSIONS = frozenset({".txt", ".text", ".md", ".markdown"})
+TEXT_EXTENSIONS = frozenset({".txt", ".text", ".log"})
+Markup = Literal["plain", "markdown", "asciidoc", "rst"]
+MARKUP_EXTENSIONS: dict[str, Markup] = {".md": "markdown", ".markdown": "markdown", ".rst": "rst",
+                                        ".adoc": "asciidoc", ".asciidoc": "asciidoc"}
 HTML_EXTENSIONS = frozenset({".html", ".htm", ".xhtml"})
+WORD_EXTENSIONS = frozenset({".docx", ".docm"})
+POWERPOINT_EXTENSIONS = frozenset({".pptx", ".pptm"})
+JSON_EXTENSIONS = frozenset({".json"})
+YAML_EXTENSIONS = frozenset({".yaml", ".yml"})
+
+#: Every extension with an extractor of its own (design memo §3.4). Other files are
+#: extracted as plain text when their bytes are text.
+EXTRACTOR_EXTENSIONS = (TEXT_EXTENSIONS | frozenset(MARKUP_EXTENSIONS) | HTML_EXTENSIONS
+                        | WORD_EXTENSIONS | POWERPOINT_EXTENSIONS | JSON_EXTENSIONS
+                        | YAML_EXTENSIONS | TABULAR_EXTENSIONS
+                        | frozenset({".pdf", ".jsonl", ".xml", ".rtf", ".eml"}))
 
 
 def extract(path: Path) -> Extracted:
-    """Extract a supported file. Raises `Unsupported` for other types and
-    `ExtractError` for a file that cannot be read as what its name says."""
+    """Extract a file. A file whose extension names no extractor is read as plain text
+    when its bytes are text (`smartrag.extract.sniff`). Raises `Unsupported` for any
+    other file and `ExtractError` for one that cannot be read as what its name says."""
     ext = path.suffix.lower()
-    if ext in TEXT_EXTENSIONS:
+    if ext in TEXT_EXTENSIONS or ext in MARKUP_EXTENSIONS:
         from smartrag.extract.text import extract_text
 
-        return extract_text(path, markdown=ext in (".md", ".markdown"))
+        return extract_text(path, markup=MARKUP_EXTENSIONS.get(ext, "plain"))
     if ext in HTML_EXTENSIONS:
         from smartrag.extract.text import extract_html
 
@@ -100,18 +118,48 @@ def extract(path: Path) -> Extracted:
         from smartrag.extract.pdf import extract_pdf
 
         return extract_pdf(path)
-    if ext == ".docx":
+    if ext in WORD_EXTENSIONS:
         from smartrag.extract.office import extract_docx
 
         return extract_docx(path)
-    if ext == ".pptx":
+    if ext in POWERPOINT_EXTENSIONS:
         from smartrag.extract.office import extract_pptx
 
         return extract_pptx(path)
-    from smartrag.extract.tabular import TABULAR_EXTENSIONS, convert_tabular
+    if ext in JSON_EXTENSIONS:
+        from smartrag.extract.structured import extract_json
 
+        return extract_json(path)
+    if ext == ".jsonl":
+        from smartrag.extract.structured import extract_jsonl
+
+        return extract_jsonl(path)
+    if ext in YAML_EXTENSIONS:
+        from smartrag.extract.structured import extract_yaml
+
+        return extract_yaml(path)
+    if ext == ".xml":
+        from smartrag.extract.structured import extract_xml
+
+        return extract_xml(path)
+    if ext == ".rtf":
+        from smartrag.extract.rtf import extract_rtf
+
+        return extract_rtf(path)
+    if ext == ".eml":
+        from smartrag.extract.mail import extract_eml
+
+        return extract_eml(path)
     if ext in TABULAR_EXTENSIONS:
+        from smartrag.extract.tabular import convert_tabular
+
         return tabular_units(convert_tabular(path))
+    from smartrag.extract.sniff import is_text_file
+
+    if is_text_file(path):
+        from smartrag.extract.text import extract_text
+
+        return extract_text(path)
     raise Unsupported(f"no extractor for {ext or 'files without an extension'}")
 
 

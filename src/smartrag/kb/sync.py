@@ -14,7 +14,9 @@ For each source (and the sink):
    nothing; a network blip must never look like the user deleting files.
 
 Files that cannot be indexed are recorded too (`skipped`: unsupported type, no text layer;
-`failed`: unreadable), with the reason, and are not retried until they change.
+`failed`: unreadable), with the reason, and are not retried until they change or the
+pipeline version does. A file whose extension names no extractor is indexed as plain text
+when its first 8 KiB are text (design memo §3.4).
 
 `dry_run` lists, extracts and chunks — so it can report documents, chunks, estimated
 tokens and problems — but calls no embedding endpoint and writes nothing.
@@ -58,12 +60,12 @@ from smartrag.kb.lock import kb_lock
 from smartrag.kb.models import SourceSync, SyncIssue, SyncReport
 from smartrag.kb.sources import (
     SINK_SIDECAR,
-    SUPPORTED_EXTENSIONS,
     ListedFile,
     Listing,
     SyncTarget,
     list_files,
     sync_targets,
+    unsupported_reason,
 )
 
 Progress = Callable[[dict[str, Any]], None]
@@ -216,10 +218,12 @@ class _Run:
             return "unchanged", old.chunk_count
 
         ext = listed.path.suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            reason = f"unsupported file type {ext or '(no extension)'}"
-            return self._record(target, listed, old, None, "skipped", reason), 0
         try:
+            # A file whose extension names no extractor is sniffed before it is read, so
+            # a large binary costs one small read, not a whole one.
+            unsupported = unsupported_reason(listed.path)
+            if unsupported:
+                return self._record(target, listed, old, None, "skipped", unsupported), 0
             data = listed.path.read_bytes()
         except OSError as exc:
             reason = f"cannot read: {exc.strerror or exc}"

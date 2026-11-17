@@ -67,6 +67,32 @@ def test_first_sync_indexes_and_records_skips(home, docs):
         assert json.load(handle)["kb"] == "legal"
 
 
+def test_text_files_without_an_extractor_are_indexed_and_binaries_skipped(home, docs):
+    (docs / "tool.py").write_text("def 休暇():\n    return '年休'\n", encoding="utf-8")
+    (docs / "blob.dat").write_bytes(b"\x00" * 64)
+    add_source(home, "legal", "docs", str(docs))
+    report = sync_kb(home, "legal", embedder=FakeEmbedder())
+    assert report.counts.added == 3
+    assert {issue.path for issue in report.issues} == {"image.png", "blob.dat"}
+
+
+def test_files_skipped_by_an_older_extractor_are_checked_again(home, docs, monkeypatch):
+    import smartrag.kb.sync as sync_module
+
+    (docs / "config.yaml").write_text("休暇: 年10日\n", encoding="utf-8")
+    add_source(home, "legal", "docs", str(docs))
+    monkeypatch.setattr(sync_module, "unsupported_reason",
+                        lambda path: "unsupported file type .yaml"
+                        if path.suffix == ".yaml" else None)
+    monkeypatch.setattr(sync_module, "EXTRACTOR_VERSION", "old")
+    assert sync_kb(home, "legal", embedder=FakeEmbedder()).counts.skipped == 2  # and image.png
+    monkeypatch.undo()
+    embedder = FakeEmbedder()
+    report = sync_kb(home, "legal", embedder=embedder)
+    assert (report.counts.updated, report.counts.skipped) == (3, 1)  # config.yaml now ok
+    assert report.chunks_embedded == 1, "only the new file's chunk is embedded"
+
+
 def test_unchanged_files_are_not_reprocessed_or_retried(home, docs):
     add_source(home, "legal", "docs", str(docs))
     sync_kb(home, "legal", embedder=FakeEmbedder())
