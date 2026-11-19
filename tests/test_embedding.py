@@ -97,7 +97,7 @@ def _custom(url: str, **extra) -> EmbeddingConfig:
 def test_the_first_wave_is_in_the_catalog():
     providers = catalog()
     assert set(providers) == {"oumigo", "voyage_ai", "openai", "google_gemini", "cohere",
-                              "mistral", "custom"}
+                              "custom"}
     assert set(providers["oumigo"].models) == {
         "ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k", "harrier-oss-v1-0.6b@32k"}
     listed = {p.provider_id: p for p in provider_list().providers}
@@ -297,7 +297,7 @@ def test_a_request_refused_for_a_minute_is_split_and_later_batches_stay_small(
     assert [len(b["input"]) for b in bodies[sent:]] == [1, 1]
 
 
-# --- the second wave: Cohere's native API, Mistral -----------------------------------
+# --- the second wave: Cohere's native API ------------------------------------------
 
 
 def test_cohere_marks_queries_and_documents_on_its_native_api(endpoint):
@@ -318,13 +318,11 @@ def test_cohere_marks_queries_and_documents_on_its_native_api(endpoint):
     assert bodies[1]["input_type"] == "search_document"
 
 
-def test_cohere_pro_and_fast_share_a_space_and_mistral_marks_nothing():
+def test_cohere_pro_and_fast_share_a_space():
     pro = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro"))
     fast = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-fast"))
     assert pro.space == fast.space
     assert pro.space.key == "@cohere/embed-v5.0-suite|2048|field:input_type"
-    mistral = resolve(EmbeddingConfig(provider_id="mistral", model_profile_id="mistral-embed"))
-    assert mistral.space.key == "@mistralai/mistral-embed|1024|none"
     with pytest.raises(ValueError, match="over provider 'cohere'"):
         EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro", batch_size=97)
     with pytest.raises(ValueError, match="cannot return 300"):

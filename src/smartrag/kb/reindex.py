@@ -35,6 +35,7 @@ from smartrag.kb.home import INDEX_FILE, REBUILD_FILE, Home
 from smartrag.kb.lock import kb_lock
 from smartrag.kb.models import SyncReport
 from smartrag.kb.sync import _execute, _finish, _prepare, _Run, sync_into, sync_kb
+from smartrag.search.vectors import refresh_after_write
 
 _SIDE_FILES = ("-wal", "-shm")
 
@@ -98,6 +99,7 @@ def reindex_rebuild(home: Home, kb_id: str, *, dry_run: bool = False,
             return _finish(report, started, kb_dir / "runs")
         _carry_manifests(live, fresh)
         _swap(live, fresh)
+        refresh_after_write(live, kb_dir / "cache", report.vector_space)
         return _finish(report, started, kb_dir / "runs")
 
 

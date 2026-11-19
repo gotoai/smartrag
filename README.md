@@ -50,7 +50,7 @@ smartrag run --format json kb list                      # JSON for programs, err
 | `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts, `--embedding-parallelism N` keeps up to N embedding requests in flight, each in a worker process (default: the kb's `embedding.parallelism`, 1; raise it for a remote endpoint; `kb ingest` and `kb reindex` take it too). Rate limits are waited out (`--adapt-to-rate-limit=false` stops at the first one instead). On a terminal, a progress bar redrawn every `--refresh` seconds (default 1). Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
 | `kb ingest --kb ID PATH...` | Copy files (folders with `--recursive=true`) into the kb's sink and index them; copies are snapshots, the same content twice is a no-op |
 | `kb reindex --kb ID --refresh-stale-only\|--rebuild` | Re-process stale documents, or rebuild the index beside the live one and swap it in (also how a kb moves to another vector space, and how an index from an older smartrag is rebuilt). A stopped rebuild is continued by the next `--rebuild`, without embedding again what it had done |
-| `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--search-mode`, `--group-by`, filters, `--page`/`--cursor`). Evidence only, never an answer |
+| `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--search-mode`, `--group-by`, filters incl. `--attr KEY=VALUE` on manifest attributes, `--page`/`--cursor`). Evidence only, never an answer |
 | `kb read --kb ID --chunk CHUNK_ID` | A search result widened to `--scope neighbors|section|document`, paged by `--max-chars` |
 | `source list --kb ID` | Registered sources plus the reserved `sink` |
 | `source add --kb ID --source SID LOCATION` | Register a folder or file. Nothing is copied |
@@ -65,7 +65,9 @@ smartrag run --format json kb list                      # JSON for programs, err
 - Supported file types: PDF, DOCX/DOCM, PPTX/PPTM, HTML, Markdown, reStructuredText,
   AsciiDoc, RTF, e-mail (`.eml`), JSON, JSON Lines, YAML and XML (flattened to `path: value`
   records), plain text and logs, and tables (CSV, TSV, XLSX, XLSM, XLS, XLSB), which are
-  converted to TSV internally. Any other file is indexed as plain text when its first 8 KiB
+  converted to TSV internally. Tables inside HTML and Markdown (pipe tables) are read as
+  tables too: a large one repeats its header row, with its caption (such as `（単位：百万円）`),
+  on every chunk, and a small one is kept whole with the text around it. Any other file is indexed as plain text when its first 8 KiB
   are text, so source code and configuration files need no list. Secrets (`.env`, keys,
   `.ssh`), tool folders and lock files are always excluded. `source test` lists the rest.
 
@@ -100,7 +102,6 @@ A kb picks a provider and one of its models from the catalog (`provider list`,
 | `openai` | `text-embedding-3-small`, `text-embedding-3-large` | fixed | `${OPENAI_API_KEY}` |
 | `google_gemini` | `gemini-embedding-2` | fixed | `${GEMINI_API_KEY}` |
 | `cohere` | `embed-v5.0-pro`, `embed-v5.0-fast` (one vector space) | fixed | `${CO_API_KEY}` |
-| `mistral` | `mistral-embed` | fixed | `${MISTRAL_API_KEY}` |
 | `custom` | any OpenAI-compatible endpoint, described in the config | `${SMARTRAG_EMBED_BASE_URL}` | `${SMARTRAG_EMBED_API_KEY}` |
 
 ```yaml
@@ -156,8 +157,8 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
 | Tool | Purpose |
 |---|---|
 | `list_kbs()` | The usable kbs: `kb_id` and description only |
-| `describe_sources(kb_id)` | Sources, file types, date range, last sync; the filter values `search` accepts |
-| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before)` | Hybrid search: passages with snippets and citations, never an answer |
+| `describe_sources(kb_id)` | Sources, file types, date range, last sync; the filters `search` accepts, allow-listed manifest attributes included |
+| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before, attributes)` | Hybrid search: passages with snippets and citations, never an answer. `attributes` filters on manifest attributes: a value, a list, or `{from, to}` |
 | `read(kb_id, chunk_id, scope, cursor)` | A passage widened to `neighbors`, its `section` or the `document`, in pages |
 
 - **Read-only.** Agents never sync, ingest or change a kb.

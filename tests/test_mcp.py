@@ -30,7 +30,7 @@ async def test_four_read_only_tools_with_a_kb_id_enum(agent_home):
             assert tool.input_schema["properties"]["kb_id"]["enum"] == ["legal"]
     search = tools["search"].input_schema["properties"]
     assert set(search) == {"kb_id", "query", "k", "cursor", "source", "file_type",
-                           "modified_after", "modified_before"}
+                           "modified_after", "modified_before", "attributes"}
     assert set(tools["read"].input_schema["properties"]) == {"kb_id", "chunk_id", "scope",
                                                               "cursor"}
 

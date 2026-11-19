@@ -8,6 +8,7 @@ document, and Kari resolves `(kb_id, doc_id)` to the file when the user opens it
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -48,9 +49,18 @@ class SourceSummary(BaseModel):
 
 
 class FilterInfo(BaseModel):
-    name: str
-    values: list[str] | None = Field(default=None, description="The values this kb holds.")
+    name: str = Field(description="A search argument; `attributes.KEY` is KEY in the "
+                                  "`attributes` argument.")
+    values: Sequence[str | int | float | bool] | None = Field(default=None, description="The values this kb "
+                                                                     "holds.")
+    type: str | None = Field(default=None, description="For an attribute: string, number, "
+                                                       "integer or boolean.")
     format: str | None = None
+    shapes: list[str] | None = Field(
+        default=None, description="For an attribute: value, list (any of the values) and "
+                                  "range ({\"from\", \"to\"}, both ends included).")
+    description: str | None = Field(default=None, description="What the attribute means, "
+                                                               "from the documents' publisher.")
 
 
 class KbDescription(BaseModel):

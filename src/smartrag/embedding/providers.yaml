@@ -5,8 +5,9 @@
 # and the request limits. Prices are USD per 1M input tokens.
 #
 # First wave (2026-11-16): oumigo, voyage_ai, openai, google_gemini, custom. Second wave
-# (2026-11-17): cohere, mistral. Values marked VERIFY are settled by live API calls before
-# the entry is final (Appendix C).
+# (2026-11-17): cohere. Mistral, added the same day, is out of v1 (2026-11-19); its
+# OpenAI-compatible API is still reachable through `custom`. Values marked VERIFY are
+# settled by live API calls before the entry is final (Appendix C).
 
 oumigo:
   title: OumiGo
@@ -163,30 +164,6 @@ cohere:
       dimensions: 2048
       allowed_dimensions: [256, 512, 768, 1024, 1536, 2048]
       max_input_tokens: 128000
-
-mistral:
-  title: Mistral AI
-  base_url: https://api.mistral.ai/v1
-  api_key_env: MISTRAL_API_KEY
-  key_required: true
-  dialect:
-    wire: openai
-    auth: bearer
-    marking: {kind: none}
-  # VERIFY: Mistral publishes no per-request limits for embeddings. Smart RAG's own bound
-  # on inputs; LangChain's Mistral client keeps a request under 16k tokens.
-  max_inputs: 2048
-  max_request_tokens: 16000
-  data_terms: >-
-    Training on API data depends on the plan: Scale is opted out by default, others can
-    opt out in the Admin Console (https://help.mistral.ai/en/articles/455207).
-  checked: '2026-11-17'
-  models:
-    mistral-embed:
-      canonical_name: '@mistralai/mistral-embed'
-      dimensions: 1024
-      max_input_tokens: 8192
-      price: 0.10
 
 custom:
   title: Custom OpenAI-compatible endpoint

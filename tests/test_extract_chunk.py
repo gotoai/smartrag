@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from smartrag.chunking import chunk_units, estimate_tokens
+from smartrag.chunking import chunk_units, estimate_tokens, fit_opath
 from smartrag.extract.units import Unit, extract, heading_level
 from smartrag.kb.config import ChunkConfig
 
@@ -176,6 +176,24 @@ def test_headings_set_paths_and_cut_full_chunks():
                                                 ["第4章 賃金"]]
     assert all(text[c.start:c.end] == c.text for c in chunks)
     assert chunks[1].embed_text() == "第3章 休暇 > 第12条 年休\n" + "い" * 60
+
+
+def test_the_embedded_opath_is_shortened_to_fit_its_budget():
+    path = ["報告書", "第一部", "第４【経理の状況】", "３【中間財務諸表】", "（２）【中間損益計算書】"]
+    full = estimate_tokens(" > ".join(path))
+    short = estimate_tokens(" > ".join(path[:1] + path[-2:]))
+    assert fit_opath(path, full) == path
+    assert fit_opath(path, full - 1) == path[:1] + path[-2:]
+    assert fit_opath(path, short - 1) == []
+    three = estimate_tokens(" > ".join(path[:3]))
+    assert fit_opath(path[:3], three - 1) == []  # three levels: no shorter form
+    units = [Unit(h, "heading", level=n) for n, h in enumerate(path, 1)] + [Unit("あ" * 120)]
+    ratio = (full - 1) / CONFIG.max_tokens  # the full path just over its budget
+    _text, chunks = chunk_units(units, CONFIG.model_copy(update={"max_opath_info_ratio": ratio}))
+    assert chunks[0].heading_path == path  # citations keep the full OPath
+    assert chunks[0].embed_text() == "報告書 > ３【中間財務諸表】 > （２）【中間損益計算書】\n" + "あ" * 120
+    _text, chunks = chunk_units(units, CONFIG)  # the default half of max_tokens
+    assert chunks[0].embed_opath == path
 
 
 def test_table_rows_stay_together_and_repeat_the_header():

@@ -12,6 +12,10 @@ import pytest
 from smartrag.errors import Unsupported
 from smartrag.extract.sniff import looks_binary
 from smartrag.extract.units import extract
+from smartrag.kb.config import ChunkConfig
+
+#: The table tests' sizes are set against these budgets, not the defaults.
+TABLE_CHUNKS = ChunkConfig(target_tokens=350, max_tokens=512)
 
 
 def _pairs(units):
@@ -87,6 +91,142 @@ def test_asciidoc_headings_and_listing_blocks(tmp_path):
     assert _pairs(extracted.units) == [
         ("heading", 1, "手引き"), ("text", 0, ":toc:"), ("heading", 2, "申請"),
         ("text", 0, "申請する。"), ("text", 0, "----\n== not a heading\n----")]
+
+
+# --- Markdown tables ---------------------------------------------------------------
+
+
+def test_markdown_headings_are_its_hash_lines_only(tmp_path):
+    path = tmp_path / "hanki.md"
+    path.write_text(
+        "# 半期報告書\n\n## 第一部【企業情報】\n\n##### 【注記事項】\n\n"
+        "【セグメント情報】\n\n単一セグメントである。\n\n■ 補足\n\n"
+        "##### （２）【中間損益計算書】\n", encoding="utf-8")
+    assert _pairs(extract(path).units) == [
+        ("heading", 1, "半期報告書"), ("heading", 2, "第一部【企業情報】"),
+        ("heading", 5, "【注記事項】"), ("text", 0, "【セグメント情報】"),
+        ("text", 0, "単一セグメントである。"), ("text", 0, "■ 補足"),
+        ("heading", 5, "（２）【中間損益計算書】")]
+
+
+def test_markdown_pipe_tables_are_tables(tmp_path):
+    path = tmp_path / "yuho.md"
+    path.write_text(
+        "# 有価証券報告書\n\n連結貸借対照表は次のとおり。\n"
+        "| 科目 | 前期 | 当期 |\n"
+        "|:---|---:|---:|\n"
+        "| 現金\\|預金 | 1,000 | 1,200 |\n"
+        "| 売掛金<br>（純額） | 500 | 450 |\n"
+        "| \u3000\u3000流動資産合計 | 1,500 | 1,650 |\n"
+        "|  |  |  |\n"
+        "\n"
+        "注記は省略。\n\n"
+        "部門 | 人数\n"
+        "--- | ---\n"
+        "営業 | 12\n"
+        "以上\n", encoding="utf-8")
+    units = extract(path).units
+    assert _pairs(units) == [
+        ("heading", 1, "有価証券報告書"), ("text", 0, "連結貸借対照表は次のとおり。"),
+        ("header", 0, "科目\t前期\t当期"), ("row", 0, "現金|預金\t1,000\t1,200"),
+        ("row", 0, "売掛金 （純額）\t500\t450"),
+        ("row", 0, "\u3000\u3000流動資産合計\t1,500\t1,650"), ("text", 0, "注記は省略。"),
+        ("header", 0, "部門\t人数"), ("row", 0, "営業\t12"), ("text", 0, "以上")]
+    assert [u.group for u in units if u.kind in ("header", "row")] == [1, 1, 1, 1, 2, 2]
+
+
+@pytest.mark.parametrize("text", [
+    "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n",  # inside fenced code
+    "見出し\n---\n",  # a rule under a line without pipes
+    "| a | b |\nno delimiter here\n",
+])
+def test_what_is_not_a_markdown_table(tmp_path, text):
+    path = tmp_path / "doc.md"
+    path.write_text(text, encoding="utf-8")
+    assert {u.kind for u in extract(path).units} <= {"text", "heading"}
+
+
+def test_a_long_markdown_table_keeps_its_header_on_every_chunk(tmp_path):
+    from smartrag.chunking import chunk_units
+
+    rows = "".join(f"| 項目{i} | {i * 1000:,} | {i * 1100:,} |\n" for i in range(1, 121))
+    path = tmp_path / "bs.md"
+    path.write_text("## 連結貸借対照表\n\n| 科目 | 前連結会計年度 | 当連結会計年度 |\n"
+                    "|---|---:|---:|\n" + rows, encoding="utf-8")
+    _text, chunks = chunk_units(extract(path).units, TABLE_CHUNKS)
+    assert len(chunks) > 1
+    assert {c.prefix for c in chunks} == {"科目\t前連結会計年度\t当連結会計年度"}
+    assert all(c.heading_path == ["連結貸借対照表"] for c in chunks)
+    assert "|" not in "".join(c.text for c in chunks)
+
+
+def test_a_small_table_is_packed_whole_with_the_text_around_it(tmp_path):
+    from smartrag.chunking import chunk_units
+
+    path = tmp_path / "note.md"
+    path.write_text("## 注記\n\n（単位：百万円）\n\n| 区分 | 金額 |\n|---|---:|\n| 土地 | 100 |\n"
+                    "| 建物 | 200 |\n\n上記は担保に供している資産である。\n", encoding="utf-8")
+    _text, chunks = chunk_units(extract(path).units, TABLE_CHUNKS)
+    assert len(chunks) == 1 and chunks[0].prefix == ""
+    assert chunks[0].text == ("（単位：百万円）\n区分\t金額\n土地\t100\n建物\t200\n"
+                              "上記は担保に供している資産である。")
+
+
+def test_a_small_table_is_never_split_between_chunks(tmp_path):
+    from smartrag.chunking import chunk_units
+
+    # About 300 tokens of prose, below the target, then a table of about 350: together
+    # they pass max_tokens, so the table starts the next chunk, whole.
+    rows = "".join(f"| 項目{i} | {i} |\n" for i in range(120))
+    path = tmp_path / "doc.md"
+    path.write_text("前置きの文章です。" * 50 + "\n\n| 項目 | 値 |\n|---|---|\n" + rows,
+                    encoding="utf-8")
+    _text, chunks = chunk_units(extract(path).units, TABLE_CHUNKS)
+    assert len(chunks) == 2 and "項目" not in chunks[0].text
+    assert chunks[1].text.startswith("項目\t値\n項目0\t0") and "項目119" in chunks[1].text
+
+
+def test_a_caption_line_travels_with_the_table_header(tmp_path):
+    from smartrag.chunking import chunk_units
+
+    rows = "".join(f"| 項目{i} | {i:,} |\n" for i in range(200))
+    path = tmp_path / "bs.md"
+    path.write_text("## 連結貸借対照表\n\n（単位：百万円）\n\n| 科目 | 当期 |\n|---|---:|\n" + rows,
+                    encoding="utf-8")
+    units = extract(path).units
+    assert _pairs(units)[1] == ("header", 0, "（単位：百万円）\n科目\t当期")
+    _text, chunks = chunk_units(units, TABLE_CHUNKS)
+    assert len(chunks) > 1 and {c.prefix for c in chunks} == {"（単位：百万円）\n科目\t当期"}
+
+
+@pytest.mark.parametrize(("above", "header"), [
+    ("表1 地域別売上高", "表1 地域別売上高\n地域\t売上"),
+    ("（単位：百万円）\n\n報告セグメント", "（単位：百万円）\n報告セグメント\n地域\t売上"),
+    ("前置き\n\n（単位：百万円）\n\n報告セグメント", "（単位：百万円）\n報告セグメント\n地域\t売上"),
+    ("地域別の売上は次のとおりです。", "地域\t売上"),  # a sentence introducing the table
+    ("# 売上", "地域\t売上"),  # a heading is not a caption
+])
+def test_what_counts_as_a_markdown_caption(tmp_path, above, header):
+    path = tmp_path / "t.md"
+    path.write_text(f"{above}\n\n| 地域 | 売上 |\n|---|---|\n| 東京 | 10 |\n", encoding="utf-8")
+    assert [u.text for u in extract(path).units if u.kind == "header"] == [header]
+
+
+def test_a_table_without_a_header_row_takes_its_caption_as_header(tmp_path):
+    path = tmp_path / "t.md"
+    path.write_text("（単位：千円）\n|  |  |\n|---|---|\n| 現金 | 10 |\n", encoding="utf-8")
+    assert _pairs(extract(path).units) == [("header", 0, "（単位：千円）"),
+                                           ("row", 0, "現金\t10")]
+
+
+def test_an_html_caption_joins_the_header(tmp_path):
+    path = tmp_path / "t.html"
+    path.write_text("<p>単位の注記</p><table><caption>（単位：百万円）</caption>"
+                    "<tr><th>科目</th><th>当期</th></tr><tr><td>現金</td><td>5</td></tr>"
+                    "</table>", encoding="utf-8")
+    assert _pairs(extract(path).units) == [
+        ("text", 0, "単位の注記"), ("header", 0, "（単位：百万円）\n科目\t当期"),
+        ("row", 0, "現金\t5")]
 
 
 # --- JSON, JSON Lines, YAML, XML ---------------------------------------------------

@@ -21,8 +21,10 @@ from typing import Literal
 from smartrag.errors import Unsupported
 from smartrag.extract.tabular import TABULAR_EXTENSIONS
 
-EXTRACTOR_VERSION = "4"  # 2: PDF lines joined; 3: deterministic PDF reading order;
-#                          4: more file types, and text files found by their bytes
+EXTRACTOR_VERSION = "6"  # 2: PDF lines joined; 3: deterministic PDF reading order;
+#                          4: more file types, and text files found by their bytes;
+#                          5: Markdown pipe tables read as tables; captions kept with headers;
+#                          6: Markdown headings are its `#` lines only
 
 UnitKind = Literal["heading", "text", "header", "row"]
 

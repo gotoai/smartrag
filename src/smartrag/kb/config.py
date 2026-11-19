@@ -166,10 +166,17 @@ class EmbeddingConfig(_Strict):
 class ChunkConfig(_Strict):
     """Chunking budget, counted in the embedding model's own tokenizer."""
 
-    target_tokens: int = Field(default=350, ge=16, le=8192)
-    max_tokens: int = Field(default=512, ge=16, le=8192)
+    target_tokens: int = Field(default=500, ge=16, le=8192)
+    max_tokens: int = Field(default=768, ge=16, le=8192)
     min_tokens: int = Field(default=80, ge=1, le=8192)
     overlap: int = Field(default=0, ge=0)
+    max_opath_info_ratio: float = Field(default=0.5, ge=0, le=1)
+    """The most of `max_tokens` the embedded OPath (heading path) may take (design memo §3.4)."""
+
+    @property
+    def max_embed_tokens(self) -> int:
+        """The longest text embedded: a full chunk and its OPath."""
+        return self.max_tokens + int(self.max_opath_info_ratio * self.max_tokens)
 
     @model_validator(mode="after")
     def _ordered(self) -> ChunkConfig:
@@ -288,9 +295,11 @@ class KbConfig(_Strict):
             if self.chunk is None:
                 self.chunk = ChunkConfig()
             limit = resolve(self.embedding).max_input_tokens
-            if self.chunk.max_tokens > limit:
-                raise ValueError(f"chunk.max_tokens {self.chunk.max_tokens} is over the "
-                                 f"embedding model's input limit of {limit} tokens")
+            if self.chunk.max_embed_tokens > limit:
+                raise ValueError(
+                    f"chunk.max_tokens {self.chunk.max_tokens} with its OPath "
+                    f"({self.chunk.max_embed_tokens} tokens) is over the embedding model's "
+                    f"input limit of {limit} tokens")
             if self.sink is None:
                 self.sink = SINK_ID
             seen: set[str] = set()

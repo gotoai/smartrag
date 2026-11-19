@@ -19,8 +19,25 @@ GroupBy = Literal["chunk", "document"]
 ReadScope = Literal["chunk", "neighbors", "section", "document"]
 
 
+Scalar = str | int | float | bool
+
+
+class AttributeRange(BaseModel):
+    """A range over a number or date attribute, both ends included; either may be open."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    start: str | int | float | None = Field(default=None, alias="from")
+    end: str | int | float | None = Field(default=None, alias="to")
+
+
+AttributeCondition = Scalar | list[Scalar] | AttributeRange
+"""One value, a list of values (OR), or a range (design memo §3.10)."""
+
+
 class SearchFilter(BaseModel):
-    """Lists mean OR; different fields combine with AND."""
+    """Lists mean OR; different fields combine with AND. `attributes` filters on manifest
+    attributes that their source's schema declares (design memo §3.10)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -29,10 +46,11 @@ class SearchFilter(BaseModel):
     path_prefix: str | None = None
     modified_after: datetime | None = None
     modified_before: datetime | None = None
+    attributes: dict[str, AttributeCondition] = Field(default_factory=dict)
 
     def is_empty(self) -> bool:
         return not (self.source or self.file_type or self.path_prefix
-                    or self.modified_after or self.modified_before)
+                    or self.modified_after or self.modified_before or self.attributes)
 
 
 class KbCitation(BaseModel):

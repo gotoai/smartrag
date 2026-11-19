@@ -34,6 +34,7 @@ from smartrag.agent.models import (
 )
 from smartrag.errors import SmartRAGError
 from smartrag.kb.home import Home
+from smartrag.search.models import AttributeCondition
 
 log = logging.getLogger("smartrag.mcp")
 
@@ -54,7 +55,8 @@ def instructions(kbs: list[AgentKb]) -> str:
         "",
         "How to use them:",
         ("- Choose the knowledge base by its description; describe_sources tells you its "
-         "sources, file types, dates and what document attributes mean."),
+         "sources, file types, dates, what document attributes mean, and the filters "
+         "search accepts."),
         "- search returns passages; read widens one when you need more of it.",
         "- Cite what you use as (kb_id, doc_id, title, page).",
         ("- A citation's file_path is the file's full path, and its link the document's "
@@ -113,10 +115,16 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
             description="Only files modified on or after this date (YYYY-MM-DD).")] = None,
         modified_before: Annotated[str | None, Field(
             description="Only files modified before this date (YYYY-MM-DD).")] = None,
+        attributes: Annotated[dict[str, AttributeCondition] | None, Field(
+            description="Only documents whose attributes match: a value, a list of values "
+                        "(any of them), or {\"from\": ..., \"to\": ...} for a number or "
+                        "date (both ends included). Keys and shapes: the attributes.* "
+                        "filters of describe_sources.")] = None,
     ) -> Annotated[CallToolResult, AgentSearchResponse]:
         return _result(lambda: service.search(
             kb_id, query, k=k, cursor=cursor, source=source or (), file_type=file_type or (),
-            modified_after=modified_after, modified_before=modified_before), kb_id)
+            modified_after=modified_after, modified_before=modified_before,
+            attributes=attributes), kb_id)
 
     def read(
         kb_id: KbId,

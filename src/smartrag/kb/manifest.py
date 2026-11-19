@@ -175,7 +175,7 @@ def _check_value(key: str, value: object, spec: dict[str, str] | None) -> None:
         raise ValueError(f"`{key}` must be {kind} (schema), not {value!r}")
     fmt = spec.get("format")
     assert isinstance(value, str) or fmt is None
-    if fmt == "date" and not _is_date(str(value)):
+    if fmt == "date" and not is_date(str(value)):
         raise ValueError(f"`{key}` must be a date, YYYY-MM-DD (schema), not {value!r}")
     if fmt == "date-time" and not _is_datetime(str(value)):
         raise ValueError(f"`{key}` must be an ISO 8601 date-time (schema), not {value!r}")
@@ -183,7 +183,7 @@ def _check_value(key: str, value: object, spec: dict[str, str] | None) -> None:
         raise ValueError(f"`{key}` must be a URI (schema), not {value!r}")
 
 
-def _is_date(text: str) -> bool:
+def is_date(text: str) -> bool:
     try:
         return bool(_DATE.match(text)) and date.fromisoformat(text) is not None
     except ValueError:
@@ -305,6 +305,7 @@ def _write(home: Home, kb_id: str, source_id: str, report: ManifestApplied, path
     """Count matches against the source's indexed documents, then (unless a dry run)
     replace the manifest under the kb lock."""
     from smartrag.index import SqliteIndex
+    from smartrag.search.vectors import carry_forward
 
     kb_dir = home.kb_dir(kb_id)
     index_path = kb_dir / INDEX_FILE
@@ -329,7 +330,10 @@ def _write(home: Home, kb_id: str, source_id: str, report: ManifestApplied, path
                 report.note = "the source had no manifest"
                 return
             if not report.dry_run:
+                generation = store.generation()
                 store.replace_manifest(source_id, payload, schema, keys,
                                        datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                # No chunk changed: the vector cache stays current (design memo §3.3).
+                carry_forward(kb_dir / "cache", generation, store.generation())
         finally:
             store.close()

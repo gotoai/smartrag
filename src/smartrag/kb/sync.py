@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from smartrag.chunking import TOKEN_ESTIMATOR, Chunk, chunk_units
+from smartrag.chunking import CHUNKER_VERSION, TOKEN_ESTIMATOR, Chunk, chunk_units
 from smartrag.embedding.api import Embedder, EmbeddingSpec, open_embedder, resolve
 from smartrag.errors import ConfigError, EmbedderUnavailable, InvalidRequest, SmartRAGError
 from smartrag.extract.tabular import ExtractError
@@ -67,6 +67,7 @@ from smartrag.kb.sources import (
     sync_targets,
     unsupported_reason,
 )
+from smartrag.search.vectors import refresh_after_write
 
 Progress = Callable[[dict[str, Any]], None]
 
@@ -87,7 +88,8 @@ def pipeline_version(config: KbConfig) -> str:
     processed again on the next sync."""
     assert config.chunk is not None
     payload = {"extract": EXTRACTOR_VERSION, "tokens": TOKEN_ESTIMATOR,
-               "lexify": LEXIFY_VERSION, "chunk": config.chunk.model_dump()}
+               "lexify": LEXIFY_VERSION, "chunker": CHUNKER_VERSION,
+               "chunk": config.chunk.model_dump()}
     return _sha256(json.dumps(payload, sort_keys=True))[:12]
 
 
@@ -458,6 +460,7 @@ def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool 
     with kb_lock(kb_dir, "kb reindex --refresh-stale-only" if only_stale else "kb sync"):
         sync_into(home, config, index_path, report, targets, source, force=force,
                   only_stale=only_stale, embedder=embedder, progress=progress)
+        refresh_after_write(index_path, kb_dir / "cache", report.vector_space)
         return _finish(report, started, kb_dir / "runs")
 
 

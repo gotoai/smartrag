@@ -62,6 +62,7 @@ from smartrag.search import (
     read_chunk,
     search_kb,
 )
+from smartrag.search.attributes import attr_options
 
 run_app = typer.Typer(help="Run one command and exit (non-interactive).",
                       no_args_is_help=True, add_completion=False)
@@ -424,6 +425,10 @@ def kb_search(
                                             help="Files modified on or after this date."),
     modified_before: datetime = typer.Option(None, "--modified-before", formats=_DATE_FORMATS,
                                              help="Files modified before this date."),
+    attr: list[str] = typer.Option(None, "--attr",
+                                   help="Only documents with this manifest attribute: "
+                                        "KEY=VALUE, or KEY=FROM..TO for a number or date "
+                                        "(both ends included). Repeating a key means OR."),
     include: list[IncludeOption] = typer.Option(None, "--include",
                                                 help="Extra fields: highlights, text. "
                                                      "Repeatable."),
@@ -435,14 +440,19 @@ def kb_search(
     state = _state(ctx)
     if page is not None and cursor:
         raise typer.BadParameter("give --page or --cursor, not both", param_hint="--page")
-    filters = SearchFilter(source=source or [], file_type=file_type or [], path_prefix=path,
-                           modified_after=modified_after, modified_before=modified_before)
-    invoke(state, lambda: search_kb(
-        state.home, kb, query, limit=limit, page=page, cursor=cursor,
-        search_mode=search_mode.value, group_by=group_by.value, max_per_doc=max_per_doc,
-        filters=filters,
-        include=[i.value for i in include or []], snippet_chars=snippet_chars),
-        _render_search)
+
+    def run() -> KbSearchResponse:
+        filters = SearchFilter(source=source or [], file_type=file_type or [],
+                               path_prefix=path, modified_after=modified_after,
+                               modified_before=modified_before,
+                               attributes=attr_options(state.home, kb, attr or []))
+        return search_kb(
+            state.home, kb, query, limit=limit, page=page, cursor=cursor,
+            search_mode=search_mode.value, group_by=group_by.value, max_per_doc=max_per_doc,
+            filters=filters,
+            include=[i.value for i in include or []], snippet_chars=snippet_chars)
+
+    invoke(state, run, _render_search)
 
 
 @kb_app.command("read")

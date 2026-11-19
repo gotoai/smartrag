@@ -4,10 +4,19 @@
   `[start, end)` of it, so snippets, highlights and neighbour expansion need no copy.
 * Units are packed greedily up to `target_tokens`, never past `max_tokens`.
 * A **heading** ends the current chunk if it already holds `min_tokens`; otherwise the
-  heading joins it. Every chunk records the heading path in force where it starts, which
-  is prepended to the text that gets embedded (a heading is never a chunk of its own).
-* **Table rows** share a chunk only with rows of the same table, and every such chunk
-  repeats the table's header row as its `prefix`.
+  heading joins it. Every chunk records its **OPath** (outline path, after XPath in
+  the DOM): the headings in force where it starts, `title > … > section`. It is prepended to
+  the text that gets embedded (a heading is never a chunk of its own).
+* **The embedded OPath is at most `max_opath_info_ratio` of `max_tokens`:** the full
+  OPath; if that is too long, its top level and last two (a document's title and the
+  section the chunk is in); if that is still too long, none. So the embedded text is at
+  most `max_tokens` × (1 + ratio). Citations and the keyword index keep the full OPath.
+* **A table that fits in `max_tokens`** (header and rows) is packed whole, like text, with
+  its header inline, so the many small tables of a financial report do not each become a
+  chunk of their own. It never straddles two chunks: if it does not fit in the current
+  one, it starts the next.
+* **A larger table** gets chunks of its own: its rows share a chunk only with rows of the
+  same table, and every such chunk repeats the table's header row as its `prefix`.
 * A unit longer than `max_tokens` is split at sentence ends (`。！？.!?` and line breaks);
   a single sentence that is still too long is cut into windows that overlap slightly.
 * A small last chunk is merged into the one before it when they belong together.
@@ -27,6 +36,9 @@ from smartrag.extract.units import Unit
 from smartrag.kb.config import ChunkConfig
 
 TOKEN_ESTIMATOR = "chars-v1"
+CHUNKER_VERSION = "3"  # 2: tables that fit in a chunk packed whole with the text around them;
+#                        3: the embedded OPath shortened to fit its budget;
+#                           heading lines inside a chunk count towards its size
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]")
 _SENTENCE_END = re.compile(r"(?<=[。！？!?])|(?<=\.)\s+|\n")
 _MAX_HEADING_CHARS = 80
@@ -51,12 +63,15 @@ class Chunk:
     page: int | None = None
     page_end: int | None = None
     location: str | None = None
+    embed_opath: list[str] | None = None
+    """The OPath as embedded (`fit_opath`); None embeds the full OPath."""
 
     def embed_text(self) -> str:
-        """What is embedded: heading path, then the table header, then the text."""
+        """What is embedded: the OPath, then the table header, then the text."""
         parts = []
-        if self.heading_path:
-            parts.append(" > ".join(self.heading_path))
+        path = self.heading_path if self.embed_opath is None else self.embed_opath
+        if path:
+            parts.append(" > ".join(path))
         if self.prefix:
             parts.append(self.prefix)
         parts.append(self.text)
@@ -113,8 +128,40 @@ def chunk_units(units: list[Unit], config: ChunkConfig) -> tuple[str, list[Chunk
                 location=_location(body)))
         current, current_tokens = [], 0
 
+    tables: dict[int, int] = {}  # group -> tokens of its header and rows
     for piece in pieces:
+        if piece.unit.kind in ("header", "row") and piece.unit.group is not None:
+            tables[piece.unit.group] = tables.get(piece.unit.group, 0) + piece.tokens
+
+    def add_block(block: list[_Piece]) -> None:
+        """Text, or a small table whole: never split between two chunks."""
+        nonlocal current_path, current_group, current_tokens
+        tokens = sum(p.tokens for p in block)
+        if current and (current_group is not None
+                        or current_tokens + tokens > config.max_tokens):
+            flush()
+        if not current:
+            current_path = [h for _level, h in path]
+            current_group = None
+        current.extend(block)
+        current_tokens += tokens
+        if current_tokens >= config.target_tokens:
+            flush()
+
+    i = 0
+    while i < len(pieces):
+        piece = pieces[i]
         unit = piece.unit
+        i += 1
+        group = unit.group if unit.kind in ("header", "row") else None
+        if group is not None and tables.get(group, config.max_tokens + 1) <= config.max_tokens:
+            block = [piece]
+            while i < len(pieces) and pieces[i].unit.kind in ("header", "row") \
+                    and pieces[i].unit.group == group:
+                block.append(pieces[i])
+                i += 1
+            add_block(block)
+            continue
         if unit.kind == "header":
             continue
         if unit.kind == "heading":
@@ -123,7 +170,11 @@ def chunk_units(units: list[Unit], config: ChunkConfig) -> tuple[str, list[Chunk
             heading = unit.text.strip()[:_MAX_HEADING_CHARS]
             path = [(level, h) for level, h in path if level < unit.level] + [(unit.level, heading)]
             if current:
-                current.append(piece)
+                if current_tokens + piece.tokens > config.max_tokens:
+                    flush()
+                else:  # its line is in the chunk's text, so it counts
+                    current.append(piece)
+                    current_tokens += piece.tokens
             continue
         group = unit.group if unit.kind == "row" else None
         if current and (group != current_group or current_tokens + piece.tokens
@@ -139,7 +190,20 @@ def chunk_units(units: list[Unit], config: ChunkConfig) -> tuple[str, list[Chunk
         if current_tokens >= config.target_tokens:
             flush()
     flush()
-    return text, _merge_small_tail(chunks, text, config)
+    chunks = _merge_small_tail(chunks, text, config)
+    budget = int(config.max_opath_info_ratio * config.max_tokens)
+    for chunk in chunks:
+        chunk.embed_opath = fit_opath(chunk.heading_path, budget)
+    return text, chunks
+
+
+def fit_opath(path: list[str], budget: int) -> list[str]:
+    """The OPath to embed within `budget` tokens: the full one; else its top level and
+    last two; else none."""
+    for candidate in ([path, path[:1] + path[-2:]] if len(path) > 3 else [path]):
+        if candidate and estimate_tokens(" > ".join(candidate)) <= budget:
+            return candidate
+    return []
 
 
 def _location(body: list[_Piece]) -> str | None:

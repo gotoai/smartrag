@@ -1,8 +1,9 @@
 """The agent's four operations over one home: what the MCP server exposes (memo §3.9).
 
     list_kbs()                     usable kbs: id and description only
-    describe_sources(kb_id)        sources, file types, dates, freshness
-    search(kb_id, query, ...)      hybrid, chunks, at most 3 per document
+    describe_sources(kb_id)        sources, file types, dates, freshness, filters
+    search(kb_id, query, ...)      hybrid, chunks, at most 3 per document; filters on
+                                   allow-listed attributes
     read(kb_id, chunk_id, ...)     a passage widened to its neighbours, section or document
 
 Read-only. Results are the library's `kb search` and `kb read`, projected to what an
@@ -15,6 +16,9 @@ from __future__ import annotations
 import re
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
+from typing import Any
+
+from pydantic import ValidationError
 
 from smartrag.agent.catalog import AgentCatalog
 from smartrag.agent.embedders import QueryEmbedders
@@ -33,6 +37,7 @@ from smartrag.errors import InvalidRequest
 from smartrag.kb.config import AgentConfig
 from smartrag.kb.home import Home
 from smartrag.search import KbCitation, SearchFilter, read_chunk, search_kb
+from smartrag.search.models import AttributeCondition
 
 READ_WINDOW = 1
 """Chunks on each side for `scope=neighbors`: the library's default."""
@@ -100,15 +105,24 @@ class AgentService:
     def search(self, kb_id: str, query: str, *, k: int = 10, cursor: str | None = None,
                source: Sequence[str] = (), file_type: Sequence[str] = (),
                modified_after: str | None = None,
-               modified_before: str | None = None) -> AgentSearchResponse:
+               modified_before: str | None = None,
+               attributes: Mapping[str, AttributeCondition | Any] | None = None,
+               ) -> AgentSearchResponse:
         self.catalog.require(kb_id)
         config = self.home.load(kb_id)
         assert config.embedding is not None  # a usable kb is local
+        try:
+            conditions = SearchFilter(attributes=dict(attributes or {})).attributes
+        except ValidationError:
+            raise InvalidRequest("each attribute filter is a value, a list of values, or "
+                                 "{\"from\": ..., \"to\": ...}") from None
         filters = SearchFilter(source=list(source), file_type=list(file_type),
                                modified_after=_moment(modified_after, "modified_after"),
-                               modified_before=_moment(modified_before, "modified_before"))
+                               modified_before=_moment(modified_before, "modified_before"),
+                               attributes=conditions)
         r = search_kb(self.home, kb_id, query, limit=k, cursor=cursor, filters=filters,
-                      embedder=self.embedders.get(kb_id, config.embedding))
+                      embedder=self.embedders.get(kb_id, config.embedding),
+                      visible_attributes=config.agent.attributes)
         return AgentSearchResponse(
             kb_id=kb_id, query_id=r.query_id, query=r.query,
             search_mode="keyword" if r.search_mode == "keyword" else "hybrid",

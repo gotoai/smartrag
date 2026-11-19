@@ -18,7 +18,7 @@ import re
 import time
 import unicodedata
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 
 import numpy as np
 
@@ -28,6 +28,7 @@ from smartrag.index import fts_query
 from smartrag.kb.home import Home
 from smartrag.kb.uris import uri_to_file_path
 from smartrag.paging import binding as request_binding
+from smartrag.search.attributes import documents_clause, matching_documents
 from smartrag.search.common import OpenKb, decode_cursor, encode_cursor, filter_sql, open_kb
 from smartrag.search.models import (
     GroupBy,
@@ -53,7 +54,10 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
               cursor: str | None = None, search_mode: SearchMode = "hybrid",
               group_by: GroupBy = "chunk", max_per_doc: int = 3,
               filters: SearchFilter | None = None, include: Iterable[str] = (),
-              snippet_chars: int = 300, embedder: Embedder | None = None) -> KbSearchResponse:
+              snippet_chars: int = 300, embedder: Embedder | None = None,
+              visible_attributes: Collection[str] | None = None) -> KbSearchResponse:
+    """`visible_attributes` limits the attributes `filters` may name (an agent's
+    allow-list, design memo §3.10); `None` allows every one a schema declares."""
     started = time.monotonic()
     filters = filters or SearchFilter()
     include = set(include)
@@ -70,6 +74,10 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
                                  "refine the query instead of paging further")
         pool = max(BASE_POOL, 2 * (offset + limit)) * (3 if group_by == "document" else 1)
         where, args = filter_sql(filters)
+        if filters.attributes:
+            clause, extra = documents_clause(
+                matching_documents(kb.store, filters.attributes, visible_attributes))
+            where, args = f"{where} AND {clause}", args + extra
 
         keyword: list[int] = []
         vector: list[int] = []
@@ -146,7 +154,7 @@ def _vector(kb: OpenKb, query: str, where: str, args: list[object], pool: int,
     assert kb.config.embedding is not None
     space = resolve(kb.config.embedding).space.key
     vectors = load_vectors(kb.store, kb.kb_dir / "cache", space)
-    if not vectors.rowids.size:
+    if not vectors.rows:
         return []
     cache = QueryVectorCache(kb.kb_dir / "cache")
     q = cache.get(space, query)
@@ -159,19 +167,13 @@ def _vector(kb: OpenKb, query: str, where: str, args: list[object], pool: int,
         raise ConfigError(f"the query vector has {q.shape[0]} dimensions but the index holds "
                           f"{vectors.dimensions}")
     norm = float(np.linalg.norm(q))
-    scores = vectors.matrix @ (q / (norm or 1.0))
+    allowed = None
     if not filters.is_empty():
-        allowed = np.fromiter(
+        allowed = np.unique(np.fromiter(
             (row[0] for row in kb.store.db.execute(
                 f"SELECT c.id FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
-                f"WHERE {where}", args)), dtype=np.int64)
-        scores = np.where(np.isin(vectors.rowids, allowed), scores, -np.inf)
-    count = min(pool, int(np.isfinite(scores).sum()))
-    if count <= 0:
-        return []
-    top = np.argpartition(-scores, count - 1)[:count]
-    top = top[np.argsort(-scores[top], kind="stable")]
-    return [int(vectors.rowids[i]) for i in top]
+                f"WHERE {where}", args)), dtype=np.int64))
+    return vectors.top(q / (norm or 1.0), pool, allowed)
 
 
 def _fuse(keyword: Sequence[int], vector: Sequence[int]) -> list[tuple[int, float, SideRanks]]:

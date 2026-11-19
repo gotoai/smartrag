@@ -1,12 +1,25 @@
 """Plain text, Markdown, reStructuredText, AsciiDoc and HTML.
 
-Plain text and the lightweight markups split into paragraphs at blank lines. Japanese-style
-heading lines (`第3章`, `第12条`, `【…】`, `■…`) become headings in all of them, and so
-do each markup's own headings: Markdown `#`; AsciiDoc `=` (and `#`); reStructuredText
+Plain text and the lightweight markups split into paragraphs at blank lines. Each markup's
+own headings become headings: Markdown `#`; AsciiDoc `=` (and `#`); reStructuredText
 titles underlined, or over- and underlined, with one punctuation character, levelled in
-the order their styles first appear, as docutils does. Fenced code (Markdown ```` ``` ````
+the order their styles first appear, as docutils does. Japanese-style heading lines
+(`第3章`, `第12条`, `【…】`, `■…`) are headings too, except in Markdown: there they are
+only a writer's habit, and a fixed level for them would cut across the `#` outline.
+Fenced code (Markdown ```` ``` ````
 and `~~~`, AsciiDoc `----` and `....`) stays one unit, never parsed for headings. Source
 code, logs and any other text file without an extractor of its own read as plain text.
+
+Markdown pipe tables (GitHub style: a header line, a `|---|` delimiter line, then rows)
+become tables, as HTML ones do: the header row is repeated on every chunk of the table,
+and each row is a unit of tab-separated cells, so a long financial table split over
+several chunks keeps its column names. `\\|` is a literal pipe and `<br>` a space.
+
+A table's caption travels with its header, so every chunk of a long table says its unit:
+an HTML table's `<caption>`, and in Markdown, which has no caption syntax, a single short
+line directly above the table that does not end like a sentence, such as `（単位：百万円）`
+or `表1 地域別売上高` (but not `…次のとおり。`), becomes the first line of the header; two
+such lines (a unit and a title) both do.
 
 HTML is reduced to block-level text with the standard library's parser: `h1`-`h6` become
 headings, `tr` rows become TSV, and `script`, `style`, `nav`, `header`, `footer` and
@@ -21,6 +34,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from smartrag.extract.encoding import decode_bytes
+from smartrag.extract.tabular import tsv_line
 from smartrag.extract.units import Extracted, Markup, Unit, UnitKind, heading_level
 
 _MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -30,6 +44,9 @@ _FENCES = {
     "asciidoc": re.compile(r"^(```|-{4,}|\.{4,})\s*$"),
 }
 _RST_ADORNMENT = re.compile(r"^([!-/:-@\[-`{-~])\1{2,}\s*$")
+_TABLE_DELIMITER = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+_BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
 def extract_text(path: Path, *, markup: Markup = "plain") -> Extracted:
@@ -50,6 +67,8 @@ def paragraphs(text: str, markup: Markup = "plain") -> list[Unit]:
     units: list[Unit] = []
     buffer: list[str] = []
     fence: list[str] | None = None
+    resume = 0  # the line after a table already read
+    tables = 0
 
     def flush() -> None:
         if buffer:
@@ -69,6 +88,13 @@ def paragraphs(text: str, markup: Markup = "plain") -> list[Unit]:
         if fence is not None:
             fence.append(line)
             continue
+        if i < resume:
+            continue
+        if markup == "markdown" and _table_start(lines, i):
+            flush()
+            tables += 1
+            resume = _table(lines, i, tables, units)
+            continue
         if i in adornments:
             continue
         if not line.strip():
@@ -83,7 +109,40 @@ def paragraphs(text: str, markup: Markup = "plain") -> list[Unit]:
     if fence is not None:
         units.append(Unit("\n".join(fence)))
     flush()
-    return [u for u in units if u.text]
+    units = [u for u in units if u.text]
+    return table_captions(units, by_shape=True) if markup == "markdown" else units
+
+
+def _table_start(lines: list[str], i: int) -> bool:
+    """A Markdown table starts at a line with a pipe followed by a delimiter line."""
+    return "|" in lines[i] and i + 1 < len(lines) and "|" in lines[i + 1] \
+        and bool(_TABLE_DELIMITER.match(lines[i + 1]))
+
+
+def _table(lines: list[str], i: int, group: int, units: list[Unit]) -> int:
+    """Read the table starting at line `i` into header and row units; return the line
+    after it. A table ends at a blank line or a line without a pipe."""
+    header = _cells(lines[i])
+    if any(header):
+        units.append(Unit(tsv_line(header), "header", group=group))
+    j = i + 2
+    while j < len(lines) and lines[j].strip() and "|" in lines[j]:
+        cells = _cells(lines[j])
+        if any(cells):
+            units.append(Unit(tsv_line(cells), "row", group=group))
+        j += 1
+    return j
+
+
+def _cells(line: str) -> list[str]:
+    """A row's cells. Only ASCII spaces are trimmed: Japanese statements indent sub-items
+    with full-width spaces (`　　流動資産合計`), and that indent is the row's place in the
+    hierarchy."""
+    text = line.strip().removeprefix("|")
+    if text.endswith("|") and not text.endswith("\\|"):
+        text = text[:-1]
+    return [_BR.sub(" ", cell).replace("\\|", "|").strip(" \t")
+            for cell in _CELL_SPLIT.split(text)]
 
 
 def _heading(line: str, markup: Markup, rst_level: int) -> tuple[str, int]:
@@ -93,6 +152,8 @@ def _heading(line: str, markup: Markup, rst_level: int) -> tuple[str, int]:
         match = _MD_HEADING.match(line)
         if match:
             return match.group(2), len(match.group(1))
+    if markup == "markdown":
+        return line.strip(), 0
     if markup == "asciidoc":
         match = _ADOC_HEADING.match(line)
         if match:
@@ -161,6 +222,7 @@ class _Blocks(HTMLParser):
         self._cell: list[str] | None = None
         self._group = 0
         self._pre = 0
+        self._caption = False
 
     def _flush(self) -> None:
         text = "".join(self._text)
@@ -169,7 +231,8 @@ class _Blocks(HTMLParser):
         text = text.strip()
         if text:
             kind: UnitKind = "heading" if self._heading else "text"
-            self.units.append(Unit(text, kind, level=self._heading))
+            group = self._group if self._caption else None  # a <caption>: its table's
+            self.units.append(Unit(text, kind, level=self._heading, group=group))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _SKIP:
@@ -194,6 +257,7 @@ class _Blocks(HTMLParser):
                 self._pre += 1
             if self._cell is None:
                 self._flush()
+                self._caption = tag == "caption"
         if tag == "table":
             self._group += 1
 
@@ -210,8 +274,6 @@ class _Blocks(HTMLParser):
             self._cell = None
         elif tag == "tr" and self._row is not None:
             if any(cell for cell in self._row):
-                from smartrag.extract.tabular import tsv_line
-
                 self.units.append(Unit(tsv_line(self._row), "row", group=self._group))
             self._row = None
         elif tag in _HEADINGS:
@@ -219,6 +281,7 @@ class _Blocks(HTMLParser):
             self._heading = 0
         elif tag in _BLOCK and self._cell is None:
             self._flush()
+            self._caption = False
             if tag == "pre":
                 self._pre = max(0, self._pre - 1)
 
@@ -251,7 +314,47 @@ def html_units(text: str) -> tuple[list[Unit], str | None]:
     parser = _Blocks()
     parser.feed(text)
     parser.close()
-    return _mark_table_headers(parser.units), parser.title
+    return table_captions(_mark_table_headers(parser.units), by_shape=False), parser.title
+
+
+MAX_CAPTION_CHARS = 60
+MAX_CAPTION_LINES = 2
+"""Caption lines folded into one header: a unit and a table title, in either order."""
+_SENTENCE_ENDS = ("。", "．", ".", "！", "？", "!", "?")
+"""A caption is one line of at most this many characters: a unit (`（単位：百万円）`) or a
+table title (`表1 地域別売上高`) fits, a paragraph of prose does not."""
+
+
+def table_captions(units: list[Unit], *, by_shape: bool) -> list[Unit]:
+    """Fold a table's caption into its header, so the header repeated on every chunk of a
+    long table carries it. A caption is a text unit of the table's own group (HTML's
+    `<caption>`) or, `by_shape`, a short line directly above the table. A table without a
+    header row gets the caption as its header."""
+    folded: list[Unit] = []
+    seen: set[int] = set()
+    for unit in units:
+        group = unit.group if unit.kind in ("header", "row") else None
+        if group is not None and group not in seen:
+            seen.add(group)
+            captions: list[str] = []
+            while folded and len(captions) < MAX_CAPTION_LINES and folded[-1].kind == "text" \
+                    and (folded[-1].group == group
+                         or (by_shape and _looks_like_caption(folded[-1]))):
+                captions.insert(0, folded.pop().text)
+            if captions:
+                caption = "\n".join(captions)
+                if unit.kind == "header":
+                    unit.text = f"{caption}\n{unit.text}"
+                else:
+                    folded.append(Unit(caption, "header", group=group))
+        folded.append(unit)
+    return folded
+
+
+def _looks_like_caption(unit: Unit) -> bool:
+    text = unit.text.strip()
+    return unit.group is None and bool(text) and "\n" not in text \
+        and len(text) <= MAX_CAPTION_CHARS and not text.endswith(_SENTENCE_ENDS)
 
 
 def _mark_table_headers(units: list[Unit]) -> list[Unit]:

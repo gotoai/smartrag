@@ -28,6 +28,7 @@ from smartrag.errors import NotFound
 from smartrag.index import SqliteIndex
 from smartrag.kb.config import MAX_DESCRIPTION, AgentConfig
 from smartrag.kb.home import INDEX_FILE, Home
+from smartrag.search.attributes import filterable_keys, key_values
 
 
 def agent_description(text: str) -> str:
@@ -67,9 +68,10 @@ class AgentCatalog:
             as_of = store.meta("last_sync_at") or store.db.execute(
                 "SELECT MAX(indexed_at) FROM documents").fetchone()[0]
             manifests = store.manifests()
+            agent = self.home.load(kb_id).agent
+            attribute_filters = _attribute_filters(store, agent)
         finally:
             store.close()
-        agent = self.home.load(kb_id).agent
         sources: dict[str, SourceSummary] = {}
         for row in rows:
             summary = sources.setdefault(row["source_id"], SourceSummary(
@@ -91,7 +93,7 @@ class AgentCatalog:
             filters=[FilterInfo(name="source", values=list(sources)),
                      FilterInfo(name="file_type", values=types),
                      FilterInfo(name="modified_after", format=dates),
-                     FilterInfo(name="modified_before", format=dates)])
+                     FilterInfo(name="modified_before", format=dates), *attribute_filters])
 
     def _usable(self, kb_id: str) -> AgentKb | None:
         try:
@@ -124,6 +126,17 @@ def _attribute_info(keys: list[str], schema: dict[str, Any] | None,
     shown = ["title"] + (["link"] if agent.show_paths else []) + agent.attributes
     properties = (schema or {}).get("properties", {})
     return [AttributeInfo(name=key, **properties.get(key, {})) for key in shown if key in keys]
+
+
+def _attribute_filters(store: SqliteIndex, agent: AgentConfig) -> list[FilterInfo]:
+    """The allow-listed attributes search can filter on (design memo §3.10), with their
+    values when there are few."""
+    keys = filterable_keys(store)
+    return [FilterInfo(name=f"attributes.{name}", type=key.type, format=key.format,
+                       shapes=key.shapes, description=key.description,
+                       values=key_values(store, key))
+            for name in agent.attributes
+            if (key := keys.get(name)) is not None and not key.conflict]
 
 
 def _day(mtime_ns: int | None) -> str | None:
