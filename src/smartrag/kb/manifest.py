@@ -1,4 +1,4 @@
-"""`source apply`: per-document attributes from a publisher's manifest (design memo §3.10).
+"""`source apply`: per-document attributes from a publisher's manifest.
 
 A manifest is one JSONL file, or a set applied together; each line describes one document
 of one source:
@@ -42,7 +42,7 @@ RESERVED = ("title", "link")
 TYPES = ("string", "number", "integer", "boolean")
 FORMATS = ("date", "date-time", "uri")
 MAX_DESCRIPTION = 200
-"""Characters of a schema description: publisher text that reaches agents (§3.10)."""
+"""Characters of a schema description: publisher text that reaches agents."""
 
 MAX_PROBLEMS = 20
 """Problems listed in one refusal; the count says how many more there were."""
@@ -333,7 +333,7 @@ def _write(home: Home, kb_id: str, source_id: str, report: ManifestApplied, path
                 generation = store.generation()
                 store.replace_manifest(source_id, payload, schema, keys,
                                        datetime.now(timezone.utc).isoformat(timespec="seconds"))
-                # No chunk changed: the vector cache stays current (design memo §3.3).
+                # No chunk changed: the vector cache stays current.
                 carry_forward(kb_dir / "cache", generation, store.generation())
         finally:
             store.close()

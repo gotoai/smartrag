@@ -1,4 +1,4 @@
-"""`kb ingest`: copy files into the kb's sink, then sync the sink (design memo §3.6).
+"""`kb ingest`: copy files into the kb's sink, then sync the sink.
 
 The sink is the kb's own source. A copy lives at `sink/<content-hash>/<original name>`:
 

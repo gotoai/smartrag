@@ -1,4 +1,4 @@
-"""The embedding provider catalog: `providers.yaml`, shipped in the package (design memo §3.2).
+"""The embedding provider catalog: `providers.yaml`, shipped in the package.
 
 Each provider has a URL (fixed, or per deployment through an environment variable), the
 variable its key is usually kept in, a **dialect**, request limits, data terms and its
@@ -76,7 +76,8 @@ class ModelEntry(_Strict):
     canonical_name: str
     """The Hugging Face repo id of an open model; `@<vendor>/<model>` for a closed one."""
     compatibility_id: str | None = None
-    """Set when the vendor declares a vector space shared by several models."""
+    """Set when the vendor declares a vector space shared by several models, or when the
+    model is a byte-identical mirror: then it is the original repo id."""
     dimensions: int = Field(ge=1)
     allowed_dimensions: list[int] = Field(default_factory=list)
     dimension_range: tuple[int, int] | None = None
@@ -110,7 +111,6 @@ class ProviderEntry(_Strict):
     max_inputs: int = Field(ge=1)
     max_request_tokens: int | None = Field(default=None, ge=1)
     data_terms: str
-    checked: str
     models: dict[str, ModelEntry] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -135,7 +135,7 @@ def catalog() -> dict[str, ProviderEntry]:
         raise RuntimeError(f"{CATALOG_FILE} is invalid: {exc}") from exc
 
 
-# --- `provider list`: the catalog as Kari and the CLI show it ---------------------------
+# --- `provider list`: the catalog as the CLI and agent applications show it -----------
 
 
 class ModelInfo(BaseModel):
@@ -155,7 +155,6 @@ class ProviderInfo(BaseModel):
     base_url_env: str | None
     api_key_env: str | None
     data_terms: str
-    checked: str
     models: list[ModelInfo]
 
 
@@ -175,5 +174,5 @@ def provider_list() -> ProviderList:
         providers.append(ProviderInfo(
             provider_id=provider_id, title=entry.title, base_url=entry.base_url,
             base_url_env=entry.base_url_env, api_key_env=entry.api_key_env,
-            data_terms=entry.data_terms, checked=entry.checked, models=models))
+            data_terms=entry.data_terms, models=models))
     return ProviderList(providers=providers)

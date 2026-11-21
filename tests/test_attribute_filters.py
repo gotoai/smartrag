@@ -1,4 +1,4 @@
-"""Filters on manifest attributes (design memo §3.10)."""
+"""Filters on manifest attributes."""
 
 from __future__ import annotations
 

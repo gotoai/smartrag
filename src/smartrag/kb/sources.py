@@ -86,7 +86,7 @@ BUILTIN_EXCLUDE = [
     "**/.docker/**",
 ]
 
-#: Extensions with an extractor of their own (design memo §3.4). A file with any other
+#: Extensions with an extractor of their own. A file with any other
 #: extension, or none, is extracted as plain text when its bytes are text.
 SUPPORTED_EXTENSIONS = EXTRACTOR_EXTENSIONS
 

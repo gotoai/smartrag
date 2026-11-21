@@ -9,15 +9,15 @@ One file, WAL mode, one writer (the sync, under the kb lock), any number of read
 | `contents` | each distinct extracted text once, keyed by the file's hash and the pipeline version that read it (identical files share it; a new extractor gets its own) |
 | `chunks` | spans of a document's text, their heading path and location, and their vector |
 | `chunk_fts` | FTS5, contentless, over bigram-split text: BM25 for the keyword side |
-| `manifests` | per source, the applied manifest's schema, attribute keys and row count (design memo §3.10) |
+| `manifests` | per source, the applied manifest's schema, attribute keys and row count |
 | `manifest_rows` | per source, each manifest row's attributes, keyed by the NFC-normalised path; joined to documents when results are built, so a file synced later gets its row |
 
 Vectors are float32 BLOBs. A chunk whose embedded text is unchanged keeps its vector
 across re-syncs (`vectors_for`), so editing one paragraph re-embeds one or two chunks.
-Chunks are keyed on the vector space (design memo §3.2), not on the model profile: moving
+Chunks are keyed on the vector space, not on the model profile: moving
 to another profile in the same space keeps every vector.
 
-Schema 2 (2026-11-16) replaced the profile with the vector space. An index of schema 1 is
+Schema 2 replaced the profile with the vector space. An index of schema 1 is
 not migrated: `kb reindex --rebuild` builds a new one beside it.
 """
 
@@ -374,7 +374,7 @@ class SqliteIndex:
             self.db.execute("DELETE FROM manifests WHERE source_id = ?", (source_id,))
         return self.delete_documents(row.doc_id for row in self.documents(source_id).values())
 
-    # --- manifests (design memo §3.10) ---------------------------------------------
+    # --- manifests ---------------------------------------------
 
     def replace_manifest(self, source_id: str, rows: Sequence[tuple[str, str]],
                          schema: str | None, keys: Sequence[str], applied_at: str) -> None:

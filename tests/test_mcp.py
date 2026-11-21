@@ -1,4 +1,4 @@
-"""`smartrag mcp`: the MCP adapter over the agent's view (design memo §3.9)."""
+"""`smartrag mcp`: the MCP adapter over the agent's view."""
 
 from __future__ import annotations
 

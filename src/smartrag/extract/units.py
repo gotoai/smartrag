@@ -95,7 +95,7 @@ POWERPOINT_EXTENSIONS = frozenset({".pptx", ".pptm"})
 JSON_EXTENSIONS = frozenset({".json"})
 YAML_EXTENSIONS = frozenset({".yaml", ".yml"})
 
-#: Every extension with an extractor of its own (design memo §3.4). Other files are
+#: Every extension with an extractor of its own. Other files are
 #: extracted as plain text when their bytes are text.
 EXTRACTOR_EXTENSIONS = (TEXT_EXTENSIONS | frozenset(MARKUP_EXTENSIONS) | HTML_EXTENSIONS
                         | WORD_EXTENSIONS | POWERPOINT_EXTENSIONS | JSON_EXTENSIONS

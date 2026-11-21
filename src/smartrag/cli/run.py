@@ -196,7 +196,7 @@ def kb_sync(
                                     "keep their vectors."),
     exit_with_parent: TrueFalse = typer.Option(
         TrueFalse.false, "--exit-with-parent", case_sensitive=False,
-        help="true: stop cleanly when stdin closes, which is how a parent app (Kari) says "
+        help="true: stop cleanly when stdin closes, which is how a parent app (for example Kari) says "
              "it has gone."),
     refresh: float = typer.Option(1.0, "--refresh", min=0.1, metavar="SECONDS",
                                   help="How often the progress bar is redrawn."),

@@ -2,8 +2,8 @@
 
 In JSON mode every outcome is one JSON document on stdout, failures included
 (`{"error": {"code", "message", "details"}}`, the Web API's error shape), so a caller
-such as Kari reads stdout either way and checks the exit code. In text mode errors go
-to stderr.
+(for example an agent application like Kari) reads stdout either way and checks the
+exit code. In text mode errors go to stderr.
 
 Exit codes: 0 success, 1 failed, 2 usage error (bad options; from the CLI parser).
 """

@@ -1,4 +1,4 @@
-"""`kb sync`: bring a kb's index in line with its sources (design memo §3.3, §3.6).
+"""`kb sync`: bring a kb's index in line with its sources.
 
 For each source (and the sink):
 
@@ -16,12 +16,12 @@ For each source (and the sink):
 Files that cannot be indexed are recorded too (`skipped`: unsupported type, no text layer;
 `failed`: unreadable), with the reason, and are not retried until they change or the
 pipeline version does. A file whose extension names no extractor is indexed as plain text
-when its first 8 KiB are text (design memo §3.4).
+when its first 8 KiB are text.
 
 `dry_run` lists, extracts and chunks — so it can report documents, chunks, estimated
 tokens and problems — but calls no embedding endpoint and writes nothing.
 
-With `embedding.parallelism` above 1 (§3.11), step 3's embedding requests go to worker
+With `embedding.parallelism` above 1, step 3's embedding requests go to worker
 processes, up to that many at once, while this process goes on extracting the next files;
 a document is written when all its requests are back, so documents finish out of listing
 order. Everything else stays in this process, which alone touches the index.
@@ -348,7 +348,7 @@ class _Run:
             self.report.counts.added += 1
         self.report.chunks_written += chunks
 
-    # --- embedding in worker processes (§3.11) --------------------------------------
+    # --- embedding in worker processes --------------------------------------
 
     def _submit(self, pending: _Pending, needed: list[ChunkRow], texts: list[str]) -> None:
         """Send the document's chunks as requests of `batch_size` texts, waiting whenever
@@ -521,7 +521,7 @@ def sync_into(home: Home, config: KbConfig, index_path: Path, report: SyncReport
 
 
 def _check_space(store: SqliteIndex, spec: EmbeddingSpec) -> None:
-    """Refuse to mix vector spaces (design memo §3.2); then record the space, and the
+    """Refuse to mix vector spaces; then record the space, and the
     provider and model now filling it, which may change within the space."""
     held = store.meta("vector_space")
     if held is not None and held != spec.space.key:

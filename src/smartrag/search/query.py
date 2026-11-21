@@ -1,4 +1,4 @@
-"""`kb search`: hybrid keyword + vector search over one kb (design memo §3.7).
+"""`kb search`: hybrid keyword + vector search over one kb.
 
 1. Keyword side: BM25 over the bigram FTS index (headings weigh 2, body 1, path 0.5).
 2. Vector side: the query embedded as a query, cosine against the normalised chunk vectors.
@@ -57,7 +57,7 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
               snippet_chars: int = 300, embedder: Embedder | None = None,
               visible_attributes: Collection[str] | None = None) -> KbSearchResponse:
     """`visible_attributes` limits the attributes `filters` may name (an agent's
-    allow-list, design memo §3.10); `None` allows every one a schema declares."""
+    allow-list); `None` allows every one a schema declares."""
     started = time.monotonic()
     filters = filters or SearchFilter()
     include = set(include)

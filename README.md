@@ -9,8 +9,7 @@ and other markup, RTF, e-mail, JSON/YAML/XML, CSV/TSV/Excel, and any other text 
 providers). The query-plane Web API is complete as a contract and runs on an
 in-memory demo engine; it does not yet route by kb. `kb search` and `kb read` query the index,
 and `smartrag mcp` serves them to agents. Still to come: the kb-aware Web API,
-`smartrag console`, `doc list|show|remove`, and PostgreSQL. Design:
-`../Memo/design_SmartRAG.md` §3.6 (CLI) and §3.9 (MCP).
+`smartrag console`, `doc list|show|remove`, and PostgreSQL.
 
 ## Run
 
@@ -30,36 +29,465 @@ curl -s 'http://127.0.0.1:8710/v1/search?q=有給休暇の繰り越し' | python
 
 ## Knowledge bases
 
+A first kb, from creation to search:
+
 ```sh
 smartrag run kb new --kb legal --title 法務ナレッジベース --description "契約書と社内規程"
-smartrag run kb set --kb legal --description "契約書と社内規程。判例は含まない。"
 smartrag run source add --kb legal --source kitei ~/Documents/規程 --include '**/*.pdf'
-smartrag run source test --kb legal --source kitei      # what a sync would see; reads no contents
-smartrag run kb status --kb legal
-smartrag run --format json kb list                      # JSON for programs, errors included
+smartrag run source test --kb legal --source kitei      # which files a sync would read
+smartrag run kb sync --kb legal
+smartrag run kb search --kb legal "有給休暇の繰り越し"
 ```
 
-| Command | Purpose |
-|---|---|
-| `kb list` | The kbs in the home, each `ok`, `locked` or `config_error` |
-| `kb new --kb ID` | Create `<home>/<ID>/` with `config.yaml`, `sink/`, `cache/`, `runs/`. `--provider P --model M` picks the embedding model (default `oumigo` / `ruri-v3-310m@8k`); `--remote URL --token-env VAR` makes a remote kb |
-| `kb verify --kb ID` | One short test embedding through the kb's provider: checks the URL, the key, the model and the vector size |
-| `kb set --kb ID --description TEXT` | Change the description in place (comments kept). At most 300 characters; agents choose a kb by it and do not see a kb without one |
-| `kb status --kb ID` | Settings, sources, sink, index, lock, environment variables, warnings. No network calls |
-| `kb remove --kb ID` | Delete the kb's folder (config, index, sink copies). Original files are never touched |
-| `kb sync --kb ID` | Index new and changed files, remove deleted ones; `--dry-run` writes nothing, `--source SID` one source, `--force` re-extracts, `--embedding-parallelism N` keeps up to N embedding requests in flight, each in a worker process (default: the kb's `embedding.parallelism`, 1; raise it for a remote endpoint; `kb ingest` and `kb reindex` take it too). Rate limits are waited out (`--adapt-to-rate-limit=false` stops at the first one instead). On a terminal, a progress bar redrawn every `--refresh` seconds (default 1). Exit 0 done, 1 failed, 3 done with skipped files, 130 interrupted |
-| `kb ingest --kb ID PATH...` | Copy files (folders with `--recursive=true`) into the kb's sink and index them; copies are snapshots, the same content twice is a no-op |
-| `kb reindex --kb ID --refresh-stale-only\|--rebuild` | Re-process stale documents, or rebuild the index beside the live one and swap it in (also how a kb moves to another vector space, and how an index from an older smartrag is rebuilt). A stopped rebuild is continued by the next `--rebuild`, without embedding again what it had done |
-| `kb search --kb ID "QUERY"` | Hybrid keyword + vector search: ranked chunks with snippets and citations (`--search-mode`, `--group-by`, filters incl. `--attr KEY=VALUE` on manifest attributes, `--page`/`--cursor`). Evidence only, never an answer |
-| `kb read --kb ID --chunk CHUNK_ID` | A search result widened to `--scope neighbors|section|document`, paged by `--max-chars` |
-| `source list --kb ID` | Registered sources plus the reserved `sink` |
-| `source add --kb ID --source SID LOCATION` | Register a folder or file. Nothing is copied |
-| `source remove --kb ID --source SID` | Unregister a source |
-| `source test --kb ID --source SID` | Walk it as a sync would: matches, types, skips, unreadable paths |
-| `source apply --kb ID --source SID --manifest FILE [--schema FILE]` | Replace the source's document attributes (`title`, `link`, others) from a JSONL manifest keyed by `path`; all or nothing, no re-embedding. `--clear` removes them, `--dry-run` only counts |
-| `provider list` | The embedding providers and models a kb can use, with each one's URL, key variable and data terms. No network calls |
+## Command line
 
-- The home is `--home` > `$SMARTRAG_HOME` > `~/.smartrag`; `--kb` is always required.
+### Reading the grammar
+
+| Notation | Meaning |
+|---|---|
+| `UPPERCASE` | A value you type, e.g. `ID` → `legal` |
+| `[ … ]` | Optional |
+| `a\|b` | Exactly one of the choices, typed as shown |
+| `--opt X…` | Repeatable: give the whole option again for each value, `--opt a --opt b` |
+| `--name=true\|false` | An on/off setting. It always takes a value: `--recursive=false` (or `--recursive false`); a bare `--recursive` is an error |
+| `--dry-run`, `--yes`, `--force` | A switch: give it to turn it on, with no value |
+
+Quote any value that contains spaces or `*` (`'**/*.pdf'`), so the shell passes it unchanged.
+
+### General form
+
+```
+smartrag run [--home DIR] [--format text|json] SUBJECT VERB [OPTIONS] [ARGUMENTS]
+smartrag mcp [--home DIR] [--allow-kb ID]…
+smartrag serve [--host HOST] [--port PORT] [--api-keys-file FILE] [--demo=true|false]
+               [--auth=true|false] [--log-level LEVEL]
+smartrag version
+```
+
+- `--home` and `--format` belong to `run` and go **before** the subject:
+  `smartrag run --home ./raghome kb list`, not `smartrag run kb list --home ./raghome`.
+- `--home DIR` is the folder that holds all kbs. Without it: `$SMARTRAG_HOME`, else
+  `~/.smartrag`.
+- `--format text` (default) prints for people, errors on stderr. `--format json` prints one
+  JSON document on stdout, also for a failure (`{"error": {"code", "message", "details"}}`).
+- Everything after the verb (its options and arguments) may come in any order.
+- `--kb ID` is required by every command that acts on one kb, even when the home holds only
+  one kb.
+- **Ids** (kb, source): 1–64 characters of lowercase letters, digits, `-` and `_`, starting
+  with a letter or a digit. `sink` is reserved for each kb's own folder of ingested copies.
+- **Confirmation:** `kb remove`, `source remove` and `kb reindex --rebuild` ask before
+  deleting or rebuilding. With `--format json`, or when stdin is not a terminal, nobody can
+  answer, so the command fails unless you pass `--yes`.
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | Done (a search with no results is also 0) |
+| 1 | Failed; the message says why. `source test` also exits 1 when the source's location is missing or cannot be read |
+| 2 | The command line is wrong: an unknown option, a missing required option, a bad value |
+| 3 | `kb sync`, `kb ingest`, `kb reindex` only: done, but some files were skipped or failed |
+| 130 | `kb sync`, `kb ingest`, `kb reindex` only: interrupted (Ctrl-C). Running the same command again continues where it stopped |
+
+### Commands at a glance
+
+| Command | What it does |
+|---|---|
+| [`kb list`](#kb-list) | List the kbs in the home |
+| [`kb new`](#kb-new) | Create a kb |
+| [`kb set`](#kb-set) | Change a kb's description |
+| [`kb verify`](#kb-verify) | Test the kb's embedding provider with one request |
+| [`kb status`](#kb-status) | Show a kb's settings, index and warnings |
+| [`kb remove`](#kb-remove) | Delete a kb |
+| [`kb sync`](#kb-sync) | Index the sources' new and changed files, remove deleted ones |
+| [`kb ingest`](#kb-ingest) | Copy files into the kb and index them |
+| [`kb reindex`](#kb-reindex) | Re-process old documents, or rebuild the whole index |
+| [`kb search`](#kb-search) | Search a kb |
+| [`kb read`](#kb-read) | Read a search result with its context |
+| [`source list`](#source-list) | List a kb's sources |
+| [`source add`](#source-add) | Register a folder or file for `kb sync` to follow |
+| [`source remove`](#source-remove) | Unregister a source and remove its documents |
+| [`source test`](#source-test) | Show which files a sync of a source would read |
+| [`source apply`](#source-apply) | Set or delete a source's document attributes |
+| [`provider list`](#provider-list) | List the embedding providers and models |
+
+### kb commands
+
+#### `kb list`
+
+```
+smartrag run kb list
+```
+
+Lists the kbs in the home as a table: id, title, kind (`local` or `remote`), number of
+sources, and state. The state is `ok`; `locked` (a sync or another writing command is running
+on the kb); or `config_error`, followed by what is wrong in its `config.yaml`.
+
+```sh
+smartrag run kb list
+smartrag run --format json kb list
+```
+
+#### `kb new`
+
+```
+smartrag run kb new --kb ID [--title TEXT] [--description TEXT]
+                    [--provider PROVIDER_ID] [--model MODEL_PROFILE_ID]
+smartrag run kb new --kb ID [--title TEXT] [--description TEXT]
+                    --remote URL --token-env VAR [--remote-kb REMOTE_ID]
+```
+
+Creates `<home>/ID/` with `config.yaml`, `sink/`, `cache/` and `runs/`. The first form makes
+a **local** kb: the index is built and kept on this machine.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--kb ID` | required | The new kb's id, also its folder name. Fails if the kb exists |
+| `--title TEXT` | the id | Display name |
+| `--description TEXT` | empty | What the kb contains, at most 300 characters. Agents choose a kb by it and do not see a kb without one; set it later with `kb set` |
+| `--provider PROVIDER_ID` | `gotoai` | Local kb: the embedding provider, from `provider list` |
+| `--model MODEL_PROFILE_ID` | `ruri-v3-310m@8k` | Local kb: one of that provider's models, from `provider list` |
+| `--remote URL` | – | Makes a **remote** kb instead: the `https://` URL of the Smart RAG server that holds it |
+| `--token-env VAR` | – | Remote kb, required: the name of the environment variable that holds your token for that server (the name, not the token) |
+| `--remote-kb REMOTE_ID` | the `--kb` id | Remote kb: the kb's id on that server |
+
+```sh
+smartrag run kb new --kb legal --title 法務ナレッジベース --description "契約書と社内規程"
+smartrag run kb new --kb edinet --provider gotoai --model harrier-oss-v1-0.6b@32k
+smartrag run kb new --kb hq-legal --remote https://rag.example.com --token-env HQ_RAG_TOKEN --remote-kb legal
+```
+
+#### `kb set`
+
+```
+smartrag run kb set --kb ID --description TEXT
+```
+
+Replaces the kb's description in `config.yaml`, keeping the file's comments and formatting.
+`--description` is required, at most 300 characters; `--description ""` empties it, which
+hides the kb from agents.
+
+```sh
+smartrag run kb set --kb legal --description "契約書と社内規程。判例は含まない。"
+```
+
+#### `kb verify`
+
+```
+smartrag run kb verify --kb ID
+```
+
+Sends one short test text to the kb's embedding provider and checks the URL, the API key,
+the model and the vector size. It sends a few tokens, so a cloud provider bills a negligible
+amount. Exit 1 says what failed.
+
+```sh
+GOTOAI_EMBED_BASE_URL=http://localhost:7012/v1 smartrag run kb verify --kb edinet
+```
+
+#### `kb status`
+
+```
+smartrag run kb status --kb ID
+```
+
+Shows the kb's settings, sources, sink, index size and last sync, whether a command holds its
+lock, which environment variables it needs and whether they are set, and warnings. Makes no
+network calls.
+
+```sh
+smartrag run kb status --kb legal
+```
+
+#### `kb remove`
+
+```
+smartrag run kb remove --kb ID [--yes]
+```
+
+Deletes the folder `<home>/ID/`: its config, its index and the copies in its sink. The
+original files of its sources are never touched. Asks first; `--yes` skips the question.
+
+```sh
+smartrag run kb remove --kb old-test --yes
+```
+
+#### `kb sync`
+
+```
+smartrag run kb sync --kb ID [--source SID|sink] [--dry-run] [--force]
+                     [--embedding-parallelism N] [--adapt-to-rate-limit=true|false]
+                     [--refresh SECONDS] [--exit-with-parent=true|false]
+```
+
+Brings the index in line with the sources: indexes files that are new or changed since the
+last sync, and removes the documents whose files are gone or no longer match the source's
+`include`/`exclude` patterns, and those of sources no longer registered. Unchanged files
+are not read again. An interrupted sync (exit 130) continues where it stopped when run again.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--source SID` | all sources and the sink | Sync only this source (`sink`: only the ingested copies). Documents of other sources are left as they are |
+| `--dry-run` | off | List, extract and chunk the files, and report documents, chunks and estimated tokens. Calls no embedding endpoint and writes nothing |
+| `--force` | off | Re-extract every file, changed or not. Chunks whose text did not change keep their vectors, so only changed text is embedded |
+| `--embedding-parallelism N` | the kb's `embedding.parallelism` (1 unless set) | Embedding requests in flight at once, each in its own worker process. Raise it (e.g. to 4) for a remote endpoint, so the GPU does not wait for the network |
+| `--adapt-to-rate-limit=true\|false` | `true` | `true`: wait out rate limits (429, or 503 while a model starts), as described under [Embedding providers](#embedding-providers). `false`: stop at the first one |
+| `--refresh SECONDS` | `1` | How often the progress bar is redrawn (at least 0.1) |
+| `--exit-with-parent=true\|false` | `false` | `true`: stop cleanly when stdin closes. For a parent program that starts the sync and may exit, such as an agent application like Kari |
+
+Output: on a terminal, a progress bar on stderr (it counts files, so a large file holds it
+still while its chunks are embedded), then a summary. Not on a terminal: one line per
+document. With `--format json`: one JSON object per event, one per line, and the report as
+the last line.
+
+```sh
+smartrag run kb sync --kb legal
+smartrag run kb sync --kb legal --dry-run                     # how much would be embedded
+smartrag run kb sync --kb edinet --embedding-parallelism 4    # remote endpoint
+smartrag run kb sync --kb legal --source kitei --force        # after changing extraction
+```
+
+#### `kb ingest`
+
+```
+smartrag run kb ingest --kb ID PATH… [--recursive=true|false] [--dry-run]
+                       [--embedding-parallelism N] [--adapt-to-rate-limit=true|false]
+                       [--exit-with-parent=true|false]
+```
+
+Copies the named files into the kb's sink (`<home>/ID/sink/`), then syncs the sink. The
+copies are snapshots: later edits to the originals are not picked up (to follow a folder,
+use `source add`). Only file types Smart RAG can read are copied. The same content twice,
+under any name, is copied once.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `PATH…` | required | One or more files or folders |
+| `--recursive=true\|false` | `false` | `true`: copy the files inside the named folders, at every depth. With `false`, naming a folder is refused before anything is copied |
+| `--dry-run` | off | Report the files, bytes, chunks and tokens; copy and embed nothing |
+| others | | As for `kb sync` |
+
+Exit 3 also when a named file was skipped (unsupported type, unreadable).
+
+```sh
+smartrag run kb ingest --kb legal ~/Downloads/契約書_2026.pdf ~/Downloads/覚書.docx
+smartrag run kb ingest --kb legal ~/Documents/規程 --recursive=true
+```
+
+#### `kb reindex`
+
+```
+smartrag run kb reindex --kb ID --refresh-stale-only [--dry-run] [COMMON]
+smartrag run kb reindex --kb ID --rebuild [--yes] [--dry-run] [COMMON]
+```
+
+`COMMON` is `--embedding-parallelism N`, `--adapt-to-rate-limit=true|false` and
+`--exit-with-parent=true|false`, as for `kb sync`. Give exactly one of the two modes.
+
+| Option | Meaning |
+|---|---|
+| `--refresh-stale-only` | Re-process only the documents built by an older Smart RAG pipeline (a new extractor, chunker or chunk setting). New, changed and deleted files are left for the next `kb sync` |
+| `--rebuild` | Build a complete new index beside the live one from all files, then swap it in. Search keeps using the old index meanwhile. Vectors are reused where the vector space is unchanged. This is how a kb moves to a model in another vector space. A stopped rebuild is continued by the next `--rebuild`. Asks first; `--yes` skips the question |
+| `--dry-run` | Report the work; change nothing |
+
+```sh
+smartrag run kb reindex --kb legal --refresh-stale-only
+smartrag run kb reindex --kb legal --rebuild --yes
+```
+
+#### `kb search`
+
+```
+smartrag run kb search --kb ID QUERY [-k|--limit N] [--page N | --cursor TOKEN]
+                       [--search-mode hybrid|keyword|vector] [--group-by chunk|document]
+                       [--max-per-doc N] [--source SID]… [--type EXT]… [--path PREFIX]
+                       [--modified-after DATE] [--modified-before DATE] [--attr FILTER]…
+                       [--include highlights|text]… [--snippet-chars N]
+```
+
+Returns ranked passages (chunks) with snippets and citations. It returns evidence, never an
+answer.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `QUERY` | required | Natural language. A part in double quotes must appear as an exact phrase on the keyword side; quote the whole query for the shell: `'"年次有給休暇" 繰り越し'` |
+| `-k`, `--limit N` | `10` | Results per page, 1–50 |
+| `--page N` | `1` | Page number. Use either `--page` or `--cursor`, not both |
+| `--cursor TOKEN` | – | The `next_cursor` of a previous `--format json` result: the next page of exactly that search. For programs |
+| `--search-mode` | `hybrid` | `hybrid`: keyword and vector results merged; `keyword`: words only; `vector`: meaning only |
+| `--group-by` | `chunk` | `chunk`: passages; `document`: one result per document |
+| `--max-per-doc N` | `3` | At most N passages from one document (1–50) |
+| `--source SID…` | all | Only these sources. Repeat for several: any of them |
+| `--type EXT…` | all | Only these file types, by extension without the dot: `pdf`, `md`, `docx`. Repeat for several: any of them |
+| `--path PREFIX` | – | Only files whose path inside their source's folder starts with `PREFIX`; end it with `/` to mean a folder. The text output prints `SID/PATH`: give only the `PATH` part. For `kitei/人事/就業規則.pdf`, that is `--path 人事/` |
+| `--modified-after DATE` | – | Files last modified at or after `DATE` (local time): `2026-04-01`, `2026-04-01T09:00:00` or `"2026-04-01 09:00:00"` |
+| `--modified-before DATE` | – | Files last modified before `DATE` (not including it) |
+| `--attr FILTER…` | – | Manifest attributes, see below |
+| `--include highlights\|text…` | none | Extra fields: `highlights` (the start and end of each match in the snippet, for programs), `text` (the whole chunk). Repeat for both |
+| `--snippet-chars N` | `300` | Snippet length in characters, 50–2000 |
+
+Different filters combine with AND: `--source kitei --type pdf` means PDFs of `kitei`.
+
+`--attr` filters on a document's manifest attributes (see [Manifests](#manifests-source-apply));
+only attributes that the source's schema declares can be used.
+
+| `FILTER` | Matches documents whose attribute |
+|---|---|
+| `KEY=VALUE` | equals `VALUE`, read as the key's type (`2026-03-31`, `7203`, `true`) |
+| `KEY=A --attr KEY=B` | equals `A` or `B`: repeating a key means OR (at most 100 values) |
+| `KEY=FROM..TO` | is from `FROM` to `TO`, both included. Integer, number and date keys only; for a string key, `..` is part of the value |
+| `KEY=FROM..` / `KEY=..TO` | is at least `FROM` / at most `TO` |
+
+Different keys combine with AND. A range cannot be combined with other values of the same key.
+
+Text output, per result: its rank, title, page or sheet location and outline path (OPath),
+and which side found it (`keyword 1 · vector 3` are its ranks there); the snippet; the
+source and file path and the `chunk` id (for `kb read`); the manifest link and attributes,
+if any. When the embedding endpoint cannot be reached, a `note:` line says that the
+results are keyword-only.
+
+```sh
+smartrag run kb search --kb legal "有給休暇の繰り越し"
+smartrag run kb search --kb legal '"年次有給休暇" 繰り越し' --type pdf -k 5
+smartrag run kb search --kb legal "出張旅費" --source kitei --path 人事/ --modified-after 2026-04-01
+smartrag run kb search --kb edinet "為替変動リスク" --attr sec_code=7203 --attr fiscal_year_end=2026-03-31
+smartrag run kb search --kb edinet "研究開発費" --attr sec_code=6758 --attr sec_code=7751 --attr fiscal_year_end=2025-01-01..2026-12-31
+smartrag run kb search --kb legal "経費精算" --group-by document --page 2
+```
+
+#### `kb read`
+
+```
+smartrag run kb read --kb ID --chunk CHUNK_ID [--scope chunk|neighbors|section|document]
+                     [--window N] [--max-chars N] [--page N | --cursor TOKEN]
+```
+
+Reads a search result with its context.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--chunk CHUNK_ID` | required | A chunk id from `kb search` (`chunk` in the text output, `chunk_id` in JSON) |
+| `--scope` | `chunk` | `chunk`: the chunk alone; `neighbors`: with `--window` chunks on each side; `section`: the chunks around it under the same headings (a document without headings: the whole document); `document`: the whole document |
+| `--window N` | `1` | For `--scope neighbors`: chunks on each side, 0–20 |
+| `--max-chars N` | `4000` | Characters per page, 200–100,000. Pages break between chunks |
+| `--page N` / `--cursor TOKEN` | page 1 | As for `kb search` |
+
+```sh
+smartrag run kb read --kb edinet --chunk d_ae50b334255c36406537:7a7b5aa3299b3646 --scope section
+smartrag run kb read --kb edinet --chunk d_ae50b334255c36406537:7a7b5aa3299b3646 --scope document --page 2
+```
+
+### source commands
+
+A **source** is a folder (or one file) that `kb sync` follows. Smart RAG reads the files
+where they are and copies nothing. A source has no settings command: to change its
+`include`, `exclude` or `recursive` after adding it, edit the kb's `config.yaml`.
+
+#### `source list`
+
+```
+smartrag run source list --kb ID
+```
+
+Lists the kb's sources and its `sink` as a table: id, kind, location (marked `missing` if
+it does not exist now), whether subfolders are included, and the include and exclude
+patterns. The last line lists the patterns that are always skipped.
+
+#### `source add`
+
+```
+smartrag run source add --kb ID --source SID LOCATION [--include GLOB]… [--exclude GLOB]…
+                        [--recursive=true|false] [--allow-missing=true|false]
+```
+
+Registers `LOCATION` as a new source. The next `kb sync` indexes it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `LOCATION` | required | A folder or a file: a path (`~/Documents/規程`) or a `file://` URI. It cannot be inside the kb's own folder, or already another source |
+| `--source SID` | required | The new source's id |
+| `--include GLOB…` | all files | Only files matching at least one of these patterns |
+| `--exclude GLOB…` | none | Skip files matching any of these patterns, even if included |
+| `--recursive=true\|false` | `true` | `true`: files in subfolders too; `false`: only the folder's own files |
+| `--allow-missing=true\|false` | `false` | `true`: accept a location that does not exist now, e.g. a share that is not mounted |
+
+**Patterns** are matched against each file's path relative to `LOCATION`, with `/`
+separators, ignoring case. They must not start with `/`.
+
+| Pattern part | Matches |
+|---|---|
+| `*` | Any characters within one folder or file name |
+| `?` | One character, not `/` |
+| `**/` | Zero or more folders: `**/*.pdf` is every PDF at any depth, including the top folder |
+| `**` at the end | Everything below: `_manifest/**` is everything in `_manifest/`, which is then not even walked |
+| `[abc]`, `[!abc]` | One of these characters, or none of them |
+
+Some files are always skipped, whatever the patterns: secrets (`.env`, keys, `.ssh`), tool
+folders (`.git`, `node_modules`, `.venv`) and lock files. `source list` prints the full list.
+
+```sh
+smartrag run source add --kb legal --source kitei ~/Documents/規程 --include '**/*.pdf' --include '**/*.docx'
+smartrag run source add --kb edinet --source filings /data/EDINET_DATA/rag --exclude '_manifest/**'
+smartrag run source add --kb legal --source share /mnt/legal-share --allow-missing=true
+```
+
+#### `source remove`
+
+```
+smartrag run source remove --kb ID --source SID [--yes]
+```
+
+Unregisters the source and removes its documents from the index. Its files are not touched.
+Asks first; `--yes` skips the question. The `sink` cannot be removed.
+
+```sh
+smartrag run source remove --kb legal --source share --yes
+```
+
+#### `source test`
+
+```
+smartrag run source test --kb ID --source SID|sink [--sample N]
+```
+
+Walks the source the way `kb sync` would, without reading file contents or changing
+anything, and reports how many files would be read, by type, which were skipped and why,
+and the paths that could not be read. `--sample N` (default 10, 0–1000) lists that many of
+the matching paths. Run it after `source add`, or after editing a source's patterns.
+
+```sh
+smartrag run source test --kb edinet --source filings --sample 20
+```
+
+#### `source apply`
+
+```
+smartrag run source apply --kb ID --source SID --manifest FILE… [--schema FILE] [--dry-run]
+smartrag run source apply --kb ID --source SID --clear [--dry-run]
+```
+
+The first form sets the attributes (`title`, `link` and your own keys) of the source's
+documents from a manifest, replacing the source's previous manifest. The second form
+deletes the source's manifest. Both are explained under [Manifests](#manifests-source-apply).
+
+```sh
+smartrag run source apply --kb edinet --source filings --manifest manifest.jsonl --schema schema.json --dry-run
+smartrag run source apply --kb edinet --source filings --manifest manifest.jsonl --schema schema.json
+smartrag run source apply --kb edinet --source filings --clear
+```
+
+### `provider list`
+
+```
+smartrag run provider list
+```
+
+Lists the embedding providers and models a kb can use, with each provider's URL, the
+environment variable for its key, and its data terms. Makes no network calls. `--format
+json` gives the same as data.
+
+### Notes
+
 - Secrets appear in `config.yaml` only as `${ENV_VAR}` references; a literal value is rejected.
 - Commands edit `config.yaml` in place: your comments, key order and quoting are kept.
 - Supported file types: PDF, DOCX/DOCM, PPTX/PPTM, HTML, Markdown, reStructuredText,
@@ -67,9 +495,50 @@ smartrag run --format json kb list                      # JSON for programs, err
   records), plain text and logs, and tables (CSV, TSV, XLSX, XLSM, XLS, XLSB), which are
   converted to TSV internally. Tables inside HTML and Markdown (pipe tables) are read as
   tables too: a large one repeats its header row, with its caption (such as `（単位：百万円）`),
-  on every chunk, and a small one is kept whole with the text around it. Any other file is indexed as plain text when its first 8 KiB
-  are text, so source code and configuration files need no list. Secrets (`.env`, keys,
-  `.ssh`), tool folders and lock files are always excluded. `source test` lists the rest.
+  on every chunk, and a small one is kept whole with the text around it. Any other file is
+  indexed as plain text when its first 8 KiB are text, so source code and configuration
+  files need no list.
+
+### Manifests (`source apply`)
+
+A manifest gives a source's documents attributes that are not in the files themselves, such
+as a company code or a fiscal year. Keep manifest files outside the source's folder, or
+exclude them in the source's `exclude` patterns; otherwise a sync indexes them as documents.
+
+- **The manifest file** is JSON Lines: one JSON object per line, one line per document.
+  `path` is required: the file's path relative to the source's root folder, with `/`
+  separators. Every other key is an attribute:
+  ```json
+  {"path": "yuho/7203_トヨタ自動車/2026-03期_有価証券報告書_S100Y8NY.md", "title": "トヨタ自動車 有価証券報告書 2026年3月期", "link": "https://example.com/S100Y8NY", "sec_code": "7203", "fiscal_year_end": "2026-03-31"}
+  ```
+  `title` and `link` are reserved: `title` replaces the document's extracted title in search
+  results and citations, and `link` becomes the citation's link.
+- **`--manifest FILE`** can be given more than once. The files are read together as one
+  manifest.
+- **`--schema FILE`** is a JSON Schema subset that gives each attribute a `type` (`string`,
+  `integer`, `number` or `boolean`), optionally a `format` for strings (`date`, `date-time`
+  or `uri`), and optionally a `description`. Only attributes the schema declares can be
+  used as search filters (`kb search --attr`, the MCP `attributes` argument). With a
+  schema, a manifest key the schema does not declare is an error. Without `--schema`, the
+  attributes are stored and shown, but none of them can be used as a filter.
+- **Each apply replaces the source's whole manifest.** The rows and schema of the previous
+  apply are deleted, including rows for documents that the new manifest does not list. To
+  change one document's attributes, apply the complete manifest again.
+- **All or nothing.** If any line is invalid (not a JSON object, no `path`, a value of the
+  wrong type, a key the schema does not declare), nothing is changed, and up to 20 problems
+  are listed with their file and line number.
+- **Nothing is re-extracted or re-embedded**, so an apply takes seconds. A row whose file is
+  not indexed yet is kept, and applies once a sync indexes that file. The output counts the
+  rows that matched an indexed document, the rows still waiting for their file, and the
+  indexed documents that have no row.
+- **`--clear`** deletes the source's manifest: all its rows and its schema. Give it alone,
+  without `--manifest` or `--schema`. The documents and their chunks stay in the index;
+  their search results show the extracted title (or the file name) again and have no link,
+  and attribute filters no longer match them.
+- **`--dry-run`** checks the manifest and the schema, prints the same counts, and changes
+  nothing. With `--clear`, it prints how many rows would be deleted.
+- **Agents** see an attribute only if the kb's `agent.attributes` lists it (see
+  [MCP server](#mcp-server-agents)).
 
 ## Extraction
 
@@ -97,11 +566,12 @@ A kb picks a provider and one of its models from the catalog (`provider list`,
 
 | `provider_id` | Models | URL | Key |
 |---|---|---|---|
-| `oumigo` | `ruri-v3-310m@8k`, `harrier-oss-v1-0.6b@8k`, `harrier-oss-v1-0.6b@32k` | `${OUMIGO_EMBED_BASE_URL}` | `${OUMIGO_EMBED_API_KEY}` |
+| `gotoai` | `ruri-v3-310m@8k`, `harrier-oss-v1-0.6b@8k`, `harrier-oss-v1-0.6b@32k` | `${GOTOAI_EMBED_BASE_URL}` | `${GOTOAI_EMBED_API_KEY}` |
 | `voyage_ai` | `voyage-4`, `voyage-4-lite`, `voyage-4-large` | fixed | `${VOYAGE_API_KEY}` |
 | `openai` | `text-embedding-3-small`, `text-embedding-3-large` | fixed | `${OPENAI_API_KEY}` |
 | `google_gemini` | `gemini-embedding-2` | fixed | `${GEMINI_API_KEY}` |
 | `cohere` | `embed-v5.0-pro`, `embed-v5.0-fast` (one vector space) | fixed | `${CO_API_KEY}` |
+| `mistral` | `mistral-embed` | fixed | `${MISTRAL_API_KEY}` |
 | `custom` | any OpenAI-compatible endpoint, described in the config | `${SMARTRAG_EMBED_BASE_URL}` | `${SMARTRAG_EMBED_API_KEY}` |
 
 ```yaml
@@ -115,11 +585,11 @@ embedding:
 - The index records its **vector space**: the model's compatibility id, the dimensions, and how
   queries and documents are marked. A model in another space needs `kb reindex --rebuild`; one
   in the same space (harrier `@32k` → `@8k`, `voyage-4` → `voyage-4-lite`) needs nothing.
-- Only `oumigo` and `custom` take a `base_url`; a cloud provider's URL is fixed, so its key
+- Only `gotoai` and `custom` take a `base_url`; a cloud provider's URL is fixed, so its key
   cannot be sent elsewhere. A cloud provider without its key fails before sending anything;
-  an OumiGo or custom endpoint without authentication simply gets no Authorization header.
+  a GotoAI or custom endpoint without authentication simply gets no Authorization header.
 - **Rate limits** (`kb sync`, `ingest`, `reindex`; on by default, `--adapt-to-rate-limit=false`
-  turns it off): a 429, or OumiGo's 503 while a model starts, is waited out (`Retry-After`, or
+  turns it off): a 429, or GotoAI's 503 while a model starts, is waited out (`Retry-After`, or
   a backoff doubling from 2 s to 60 s, for up to 10 minutes per request); a request still
   refused after a minute is split in halves, and later ones stay that small; fewer requests
   are kept in flight. The progress line shows each wait, the report counts them. Search does

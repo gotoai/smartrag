@@ -1,4 +1,4 @@
-"""Searching and reading a kb: the core of `kb search` and `kb read` (design memo §3.7)."""
+"""Searching and reading a kb: the core of `kb search` and `kb read`."""
 
 from smartrag.search.models import (
     KbCitation,

@@ -1,10 +1,10 @@
-"""Whether a file is text, for files no extractor claims by extension (design memo §3.4).
+"""Whether a file is text, for files no extractor claims by extension.
 
 Source code, configuration files, logs and READMEs come in more extensions than any list
-would cover, so for them the bytes decide, the way Kari's viewer decides the same
-question: a NUL byte in the first 8 KiB means binary, and so does a sample dense with
-control characters. A UTF-16 file is half NUL bytes by construction, so one that starts
-with a byte-order mark is judged on its characters instead.
+would cover, so for them the bytes decide, the way a file viewer (Kari's, for example)
+decides the same question: a NUL byte in the first 8 KiB means binary, and so does a
+sample dense with control characters. A UTF-16 file is half NUL bytes by construction, so
+one that starts with a byte-order mark is judged on its characters instead.
 
 Extensions in `NEVER_TEXT` are not read at all: formats known to be binary, so a share
 full of photos costs no reads, and formats that are text on disk but markup or encoded
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-#: What is read to decide; Kari's viewer reads the same amount.
+#: What is read to decide.
 SNIFF_BYTES = 8192
 
 #: Control bytes that appear freely in text: backspace, tab, newlines, form feed, escape.

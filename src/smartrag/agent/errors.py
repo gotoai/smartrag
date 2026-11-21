@@ -1,8 +1,8 @@
 """Errors as an agent sees them: a stable code, a message of our own, and a hint.
 
 The library's messages are written for the person running the CLI and may name the home,
-a kb's directory or the embedding endpoint's URL. None of that may reach an agent
-(design memo §3.9), so each code gets a fixed message here and only `invalid_request`,
+a kb's directory or the embedding endpoint's URL. None of that may reach an agent,
+so each code gets a fixed message here and only `invalid_request`,
 which describes the caller's own arguments, passes the library's text through.
 """
 

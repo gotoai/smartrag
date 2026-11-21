@@ -1,4 +1,4 @@
-"""`smartrag mcp`: the agent-facing MCP server over stdio (design memo §3.9).
+"""`smartrag mcp`: the agent-facing MCP server over stdio.
 
 A thin adapter over `smartrag.agent.AgentService`: four read-only tools, the usable kbs
 listed in the server instructions, `kb_id` an enum of them in every schema. Each result
@@ -8,7 +8,7 @@ the model reads it. Tool functions are synchronous: the SDK runs each call in a 
 thread, so a slow search never stalls the session.
 
 stdout carries only the protocol. Logs go to stderr at warning level and never contain
-query text (no query log in v1, design memo §6 #15).
+query text (v1 keeps no query log).
 
 No `from __future__ import annotations` here: the SDK reads the tools' signatures at
 registration, and `KbId` is built per server, so the annotations must be real objects.

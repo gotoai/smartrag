@@ -1,4 +1,4 @@
-"""CSV, TSV and Excel files as TSV table blocks — best effort (design memo §3.4).
+"""CSV, TSV and Excel files as TSV table blocks — best effort.
 
 A file becomes a list of `TableBlock`s: one per table found. Each block keeps its header
 row apart from its data rows, and the source position of every row, so the chunker can

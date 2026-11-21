@@ -1,4 +1,4 @@
-"""Filters on manifest attributes (design memo §3.10).
+"""Filters on manifest attributes.
 
 A key is filterable when its source's schema declares it; the declared type decides what a
 filter can say. Strings and booleans take one value or a list; numbers and dates also take

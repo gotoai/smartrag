@@ -49,9 +49,9 @@ def test_new_local_kb_layout_and_permissions(home):
     config = load_config(kb_dir / CONFIG_FILE)
     assert config.embedding is not None
     assert (config.embedding.provider_id, config.embedding.model_profile_id) == \
-        ("oumigo", "ruri-v3-310m@8k")
-    assert config.embedding.base_url == "${OUMIGO_EMBED_BASE_URL}"
-    assert config.embedding.api_key == "${OUMIGO_EMBED_API_KEY}"
+        ("gotoai", "ruri-v3-310m@8k")
+    assert config.embedding.base_url == "${GOTOAI_EMBED_BASE_URL}"
+    assert config.embedding.api_key == "${GOTOAI_EMBED_API_KEY}"
     assert config.sink == "sink" and config.sources == []
 
 
@@ -152,16 +152,16 @@ def test_list_reports_each_kb_without_failing_on_a_broken_one(home):
 
 
 def test_status_warns_about_what_needs_doing(home, monkeypatch, tmp_path):
-    monkeypatch.delenv("OUMIGO_EMBED_API_KEY", raising=False)
-    monkeypatch.setenv("OUMIGO_EMBED_BASE_URL", "http://oumigo.local/v1")
+    monkeypatch.delenv("GOTOAI_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("GOTOAI_EMBED_BASE_URL", "http://gotoai.local/v1")
     home.new("legal")
     status = home.status("legal")
-    assert status.env.missing == ["OUMIGO_EMBED_API_KEY"]
+    assert status.env.missing == ["GOTOAI_EMBED_API_KEY"]
     assert status.embedding is not None
     assert status.embedding.vector_space == "cl-nagoya/ruri-v3-310m|768|field:input_type"
     assert status.index is not None and not status.index.exists
     joined = " ".join(status.warnings)
-    for expected in ("no description", "OUMIGO_EMBED_API_KEY", "no index yet", "no sources"):
+    for expected in ("no description", "GOTOAI_EMBED_API_KEY", "no index yet", "no sources"):
         assert expected in joined
     with pytest.raises(NotFound):
         home.status("nope")
@@ -334,6 +334,6 @@ def test_hand_edits_that_break_the_rules_are_caught_on_load(home):
     home.new("legal")
     path = home.root / "legal" / CONFIG_FILE
     path.write_text(path.read_text(encoding="utf-8").replace(
-        "${OUMIGO_EMBED_API_KEY}", "sk-live-123"), encoding="utf-8")
+        "${GOTOAI_EMBED_API_KEY}", "sk-live-123"), encoding="utf-8")
     with pytest.raises(ConfigError, match="environment variable reference"):
         home.load("legal")

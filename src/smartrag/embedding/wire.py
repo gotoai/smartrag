@@ -1,4 +1,4 @@
-"""Request and response formats. Only this part of a dialect is code (design memo §3.2).
+"""Request and response formats. Only this part of a dialect is code.
 
 * `openai`: `POST {base}/embeddings` with `{"model", "input": [...]}` plus the marking's
   and the dimensions' fields; the answer's `data[].embedding`, ordered by `index`.

@@ -1,4 +1,4 @@
-"""The index: SQLite in v1 (design memo §3.3)."""
+"""The index: SQLite in v1."""
 
 from smartrag.index.keyword import LEXIFY_VERSION, fts_query, lexify
 from smartrag.index.store import INDEX_SCHEMA_VERSION, DocumentRow, IndexStats, SqliteIndex

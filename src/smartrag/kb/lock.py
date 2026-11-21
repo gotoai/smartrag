@@ -5,8 +5,7 @@ status, the MCP server) never take it.
 
 The lock records its holder's PID, so a lock left behind by a process that crashed or was
 killed is recognised as stale and taken over, rather than leaving the kb unusable until
-someone deletes a file by hand. Kari's Agent Desks met exactly that failure: "without it
-an orphaned desk keeps its lock and the next launch cannot start it".
+someone deletes a file by hand.
 """
 
 from __future__ import annotations

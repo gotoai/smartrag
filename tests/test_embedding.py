@@ -1,4 +1,4 @@
-"""The embedding layer (design memo §3.2): catalog, resolve, dialects, and the HTTP engine."""
+"""The embedding layer: catalog, resolve, dialects, and the HTTP engine."""
 
 from __future__ import annotations
 
@@ -96,24 +96,27 @@ def _custom(url: str, **extra) -> EmbeddingConfig:
 
 def test_the_first_wave_is_in_the_catalog():
     providers = catalog()
-    assert set(providers) == {"oumigo", "voyage_ai", "openai", "google_gemini", "cohere",
-                              "custom"}
-    assert set(providers["oumigo"].models) == {
+    assert set(providers) == {"gotoai", "voyage_ai", "openai", "google_gemini", "cohere",
+                              "mistral", "custom"}
+    assert set(providers["gotoai"].models) == {
         "ruri-v3-310m@8k", "harrier-oss-v1-0.6b@8k", "harrier-oss-v1-0.6b@32k"}
     listed = {p.provider_id: p for p in provider_list().providers}
     assert listed["openai"].api_key_env == "OPENAI_API_KEY"
-    assert listed["oumigo"].base_url is None and listed["oumigo"].base_url_env
+    assert listed["gotoai"].base_url is None and listed["gotoai"].base_url_env
 
 
 def test_profiles_of_one_model_share_a_vector_space():
-    eight = resolve(EmbeddingConfig(provider_id="oumigo",
+    eight = resolve(EmbeddingConfig(provider_id="gotoai",
                                     model_profile_id="harrier-oss-v1-0.6b@8k"))
-    long = resolve(EmbeddingConfig(provider_id="oumigo",
+    long = resolve(EmbeddingConfig(provider_id="gotoai",
                                    model_profile_id="harrier-oss-v1-0.6b@32k"))
-    ruri = resolve(EmbeddingConfig(provider_id="oumigo", model_profile_id="ruri-v3-310m@8k"))
+    ruri = resolve(EmbeddingConfig(provider_id="gotoai", model_profile_id="ruri-v3-310m@8k"))
     assert eight.space == long.space
     assert eight.space.key == "microsoft/harrier-oss-v1-0.6b|1024|field:input_type"
     assert ruri.space != eight.space
+    # Mirrors of the vendor repos: named after the mirror, in the vendor model's space.
+    assert eight.model_canonical_name == "GotoAI-Inc/harrier-oss-v1-0.6b-mirror"
+    assert ruri.space.key == "cl-nagoya/ruri-v3-310m|768|field:input_type"
 
 
 def test_a_vendor_suite_shares_one_space_and_dimensions_split_it():
@@ -135,8 +138,8 @@ def test_defaults_come_from_the_catalog():
     assert spec.base_url == "https://api.openai.com/v1"
     assert spec.api_key == "${OPENAI_API_KEY}"
     assert spec.space.key == "@openai/text-embedding-3-small|1536|none"
-    oumigo = resolve(EmbeddingConfig(provider_id="oumigo", model_profile_id="ruri-v3-310m@8k"))
-    assert oumigo.base_url == "${OUMIGO_EMBED_BASE_URL}"
+    gotoai = resolve(EmbeddingConfig(provider_id="gotoai", model_profile_id="ruri-v3-310m@8k"))
+    assert gotoai.base_url == "${GOTOAI_EMBED_BASE_URL}"
 
 
 @pytest.mark.parametrize(("fields", "message"), [
@@ -239,8 +242,8 @@ def test_a_long_server_message_is_kept_whole():
 
 
 def test_an_unset_base_url_variable_is_a_config_error():
-    with pytest.raises(ConfigError, match="OUMIGO_EMBED_BASE_URL"):
-        open_embedder(EmbeddingConfig(provider_id="oumigo", model_profile_id="ruri-v3-310m@8k"),
+    with pytest.raises(ConfigError, match="GOTOAI_EMBED_BASE_URL"):
+        open_embedder(EmbeddingConfig(provider_id="gotoai", model_profile_id="ruri-v3-310m@8k"),
                       environ={})
 
 
@@ -297,7 +300,7 @@ def test_a_request_refused_for_a_minute_is_split_and_later_batches_stay_small(
     assert [len(b["input"]) for b in bodies[sent:]] == [1, 1]
 
 
-# --- the second wave: Cohere's native API ------------------------------------------
+# --- Cohere's native API, and Mistral ------------------------------------------------
 
 
 def test_cohere_marks_queries_and_documents_on_its_native_api(endpoint):
@@ -318,11 +321,13 @@ def test_cohere_marks_queries_and_documents_on_its_native_api(endpoint):
     assert bodies[1]["input_type"] == "search_document"
 
 
-def test_cohere_pro_and_fast_share_a_space():
+def test_cohere_pro_and_fast_share_a_space_and_mistral_marks_nothing():
     pro = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro"))
     fast = resolve(EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-fast"))
     assert pro.space == fast.space
     assert pro.space.key == "@cohere/embed-v5.0-suite|2048|field:input_type"
+    mistral = resolve(EmbeddingConfig(provider_id="mistral", model_profile_id="mistral-embed"))
+    assert mistral.space.key == "@mistralai/mistral-embed|1024|none"
     with pytest.raises(ValueError, match="over provider 'cohere'"):
         EmbeddingConfig(provider_id="cohere", model_profile_id="embed-v5.0-pro", batch_size=97)
     with pytest.raises(ValueError, match="cannot return 300"):
@@ -351,14 +356,14 @@ def test_an_empty_key_sends_no_authorization_header(endpoint, environ):
 
 def test_a_set_key_is_sent_trimmed(endpoint):
     url, seen, _bodies, state = endpoint
-    state["require"] = "oumigo-key"
-    open_embedder(_custom(url), environ={"KEY": " oumigo-key\n"}).verify()
-    assert seen == ["Bearer oumigo-key"]
+    state["require"] = "gotoai-key"
+    open_embedder(_custom(url), environ={"KEY": " gotoai-key\n"}).verify()
+    assert seen == ["Bearer gotoai-key"]
 
 
 def test_a_401_without_a_key_says_no_key_was_sent(endpoint):
     url, _seen, _bodies, state = endpoint
-    state["require"] = "oumigo-key"
+    state["require"] = "gotoai-key"
     with pytest.raises(EmbedderUnavailable,
                        match=r"no API key was sent \(\$\{KEY\} is empty") as caught:
         open_embedder(_custom(url), environ={"KEY": ""}, attempts=1).verify()

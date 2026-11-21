@@ -1,4 +1,4 @@
-"""A kb's embedding settings plus the catalog → one frozen `EmbeddingSpec` (design memo §3.2).
+"""A kb's embedding settings plus the catalog → one frozen `EmbeddingSpec`.
 
 `resolve` is the only place the two are merged, and it checks the result: the provider and
 model exist, a fixed URL is not overridden, `dimensions` is one the model allows,

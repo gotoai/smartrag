@@ -1,4 +1,4 @@
-"""The MCP server: `smartrag mcp` (design memo §3.9)."""
+"""The MCP server: `smartrag mcp`."""
 
 from smartrag.mcp.server import build_server, instructions, run_stdio
 

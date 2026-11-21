@@ -1,7 +1,7 @@
 """The agent's view of a home: usable kbs, and search and read without paths.
 
 Core library, no MCP dependency: the MCP server (`smartrag.mcp`) is a thin adapter over
-`AgentService`, and the kb-aware Web API can return the same models (design memo §3.9).
+`AgentService`, and the kb-aware Web API can return the same models.
 """
 
 from smartrag.agent.catalog import MAX_DESCRIPTION, AgentCatalog, agent_description

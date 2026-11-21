@@ -35,7 +35,7 @@ class OpenKb:
         self.store.close()
 
     def manifest(self, docs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], DocAttributes]:
-        """Manifest attributes for `(source_id, rel_path)` pairs (design memo §3.10)."""
+        """Manifest attributes for `(source_id, rel_path)` pairs."""
         keys = {doc: (doc[0], normalize_path(doc[1])) for doc in set(docs)}
         rows = self.store.attributes(keys.values())
         found: dict[tuple[str, str], DocAttributes] = {}
@@ -57,7 +57,7 @@ class DocAttributes:
 def open_kb(home: Home, kb_id: str, *, check_space: bool) -> OpenKb:
     """A local kb's index, opened read-only. Raises if the kb is remote, has no index,
     or (when searching) its index holds another vector space than the config's model
-    gives (design memo §3.2)."""
+    gives."""
     config = home.load(kb_id)
     if config.kind == "remote":
         raise InvalidRequest(f"kb {kb_id!r} is remote; v1 searches and reads local kbs only",

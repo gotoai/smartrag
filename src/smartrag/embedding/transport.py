@@ -1,4 +1,4 @@
-"""HTTP for every provider, with the standard library only (design memo §3.2).
+"""HTTP for every provider, with the standard library only.
 
 * 429 and 5xx answers and connection failures are retried with backoff, waiting as long as
   the server's `Retry-After` asks (up to `MAX_RETRY_AFTER` seconds), `attempts` times.
@@ -30,7 +30,7 @@ MAX_RETRY_AFTER = 30.0
 _RETRYABLE = frozenset({429, 500, 502, 503, 504})
 
 _WAITED_OUT = frozenset({429, 503})
-"""Rate limited, or (OumiGo) a model still starting: worth waiting for, not a fault."""
+"""Rate limited, or (GotoAI) a model still starting: worth waiting for, not a fault."""
 BACKOFF_START = 2.0
 BACKOFF_MAX = 60.0
 """Rate limits are counted per minute, so a minute always reaches a fresh window."""
@@ -39,9 +39,9 @@ MIN_WAIT = 1.0
 """Even after `Retry-After: 0`: a server refusing every request is not hammered, and the
 budget below is always used up in the end."""
 WAIT_BUDGET = 600.0
-"""How long one request may wait in all. An OumiGo pod may take minutes to start its
-model (it answers 503 with `Retry-After: 30` meanwhile); beyond ten minutes something is
-wrong, and the sync stops so it can be resumed later."""
+"""How long one request may wait in all. A GotoAI endpoint's OumiGo pod may take minutes
+to start its model (it answers 503 with `Retry-After: 30` meanwhile); beyond ten minutes
+something is wrong, and the sync stops so it can be resumed later."""
 SPLIT_AFTER = 60.0
 """A full per-minute window: refused still, the request alone is over the limit."""
 

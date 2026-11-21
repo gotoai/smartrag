@@ -1,11 +1,11 @@
 """The retrieval-engine seam: what the query-plane API needs from an index.
 
 The Web API depends only on this protocol. The v1 engine (PostgreSQL + pgvector +
-PGroonga, query embeddings from OumiGo's `/v1/embeddings`) and the in-memory demo engine
+PGroonga, query embeddings from the provider's `/v1/embeddings`) and the in-memory demo engine
 both implement it, so the API never changes when the engine does.
 
 Every call receives a `RequestContext`: who is calling (the API key) and, optionally, on
-whose behalf (the end user, design memo §1.2, P2). v1 engines only log `on_behalf_of`; document
+whose behalf (the end user). v1 engines only log `on_behalf_of`; document
 permissions will use it later without an interface change.
 """
 

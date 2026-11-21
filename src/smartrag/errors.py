@@ -59,7 +59,7 @@ class IndexNotReady(SmartRAGError):
 
 
 class EmbedderUnavailable(SmartRAGError):
-    """The embedding service (OumiGo `/v1/embeddings`) cannot serve right now."""
+    """The embedding service (the provider's `/v1/embeddings`) cannot serve right now."""
 
     status = 503
     code = "embedder_unavailable"

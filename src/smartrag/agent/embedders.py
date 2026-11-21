@@ -1,8 +1,9 @@
-"""Query embedders for a long-lived server: built once, failing fast (design memo §3.9).
+"""Query embedders for a long-lived server: built once, failing fast.
 
 `kb search` builds an embedder per search, and the sync's embedder waits up to 120 s × 3
 attempts, about 6 minutes, before giving up. Both suit a one-shot command, not an agent
-waiting on a tool call (Kari's extensions time out after 300 s). Here:
+waiting on a tool call, which an agent application may time out (Kari, for example,
+after 300 s). Here:
 
 * each kb keeps one embedder for the life of the process, built on first use;
 * a query waits `QUERY_TIMEOUT` seconds with one retry: a healthy endpoint embeds one

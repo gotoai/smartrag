@@ -1,4 +1,4 @@
-"""The vector cache in partitions (design memo §3.3)."""
+"""The vector cache in partitions."""
 
 from __future__ import annotations
 

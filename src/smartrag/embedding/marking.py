@@ -1,4 +1,4 @@
-"""Telling a query from a document, as the model's dialect says (design memo §3.2).
+"""Telling a query from a document, as the model's dialect says.
 
 * `none`: the text as it is.
 * `field`: the text as it is, plus one request field, e.g. `input_type: query`.

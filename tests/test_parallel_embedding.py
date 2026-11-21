@@ -1,4 +1,4 @@
-"""Embedding requests in worker processes: `embedding.parallelism` (design memo §3.11)."""
+"""Embedding requests in worker processes: `embedding.parallelism`."""
 
 from __future__ import annotations
 
@@ -90,8 +90,8 @@ def endpoint(monkeypatch):
     state = _Endpoint(delay=0.2)
     server = ThreadingHTTPServer(("127.0.0.1", 0), state.handler())
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setenv("OUMIGO_EMBED_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
-    monkeypatch.delenv("OUMIGO_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("GOTOAI_EMBED_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+    monkeypatch.delenv("GOTOAI_EMBED_API_KEY", raising=False)
     try:
         yield state
     finally:

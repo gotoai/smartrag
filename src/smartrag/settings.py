@@ -2,7 +2,7 @@
 
 Only query-plane settings live here. The query server deliberately has no source
 credentials and no admin settings: those belong to the CLI and the ingestion worker,
-which run on the operator host (see the design memo, "admin plane").
+which run on the operator host.
 """
 
 from __future__ import annotations

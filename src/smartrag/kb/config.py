@@ -1,6 +1,6 @@
 """A knowledge base's `config.yaml`: its schema, and how it is read and written.
 
-One config per kb (design memo §3.6). The schema enforces three rules from the design
+One config per kb. The schema enforces three rules from the design
 rather than leaving them to whoever edits the file:
 
 * **Secrets appear only as `${ENV_VAR}` references.** `embedding.api_key` and
@@ -38,7 +38,7 @@ from smartrag.errors import ConfigError
 CONFIG_FILE = "config.yaml"
 CONFIG_VERSION = 1
 SINK_ID = "sink"
-DEFAULT_PROVIDER = "oumigo"
+DEFAULT_PROVIDER = "gotoai"
 DEFAULT_MODEL = "ruri-v3-310m@8k"
 """What `kb new` writes when no provider and model are given."""
 MAX_DESCRIPTION = 300
@@ -112,7 +112,7 @@ class PrefixConfig(_Strict):
 
 
 class EmbeddingConfig(_Strict):
-    """Where this kb's vectors come from (design memo §3.2): a provider and one of its
+    """Where this kb's vectors come from: a provider and one of its
     models from Smart RAG's catalog, plus this kb's own settings. Everything else (the
     URL of a cloud provider, the dialect, the limits) comes from the catalog, so it is
     never copied here. The index records the resulting vector space."""
@@ -121,9 +121,9 @@ class EmbeddingConfig(_Strict):
     model_profile_id: str
     """The model as the provider names it, sent as `model` in each request."""
     base_url: str | None = None
-    """`oumigo` and `custom` only: the endpoint's base (`…/v1`) or its full
+    """`gotoai` and `custom` only: the endpoint's base (`…/v1`) or its full
     `…/v1/embeddings` URL. Defaults to the provider's variable, e.g.
-    `${OUMIGO_EMBED_BASE_URL}`; every other provider's URL is fixed by the catalog."""
+    `${GOTOAI_EMBED_BASE_URL}`; every other provider's URL is fixed by the catalog."""
     api_key: str | None = None
     """A `${VAR}` reference. Defaults to the provider's usual variable, e.g.
     `${OPENAI_API_KEY}`. Leave the variable unset or empty for an endpoint without
@@ -171,7 +171,7 @@ class ChunkConfig(_Strict):
     min_tokens: int = Field(default=80, ge=1, le=8192)
     overlap: int = Field(default=0, ge=0)
     max_opath_info_ratio: float = Field(default=0.5, ge=0, le=1)
-    """The most of `max_tokens` the embedded OPath (heading path) may take (design memo §3.4)."""
+    """The most of `max_tokens` the embedded OPath (heading path) may take."""
 
     @property
     def max_embed_tokens(self) -> int:
@@ -237,13 +237,13 @@ class RemoteConfig(_Strict):
 
 
 class AgentConfig(_Strict):
-    """What agents see of this kb, beyond what they always see (design memo §3.9)."""
+    """What agents see of this kb, beyond what they always see."""
 
     show_paths: bool = True
     """Give agents each document's full path, and its manifest `link`, in citations. Turn
     off for a kb whose folder names or intranet hosts are themselves sensitive."""
     attributes: list[str] = Field(default_factory=list)
-    """Manifest attributes agents may see (design memo §3.10). `title` is always shown and
+    """Manifest attributes agents may see. `title` is always shown and
     `link` follows `show_paths`, so neither is listed."""
 
     @field_validator("attributes")

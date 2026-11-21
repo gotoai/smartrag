@@ -1,4 +1,4 @@
-"""What `kb search` and `kb read` return (design memo §3.7).
+"""What `kb search` and `kb read` return.
 
 These follow the Web API's search contract (`smartrag.models`) and add what a kb-aware
 search needs: the kb, the search mode that actually ran, why it fell back if it did, each
@@ -32,12 +32,12 @@ class AttributeRange(BaseModel):
 
 
 AttributeCondition = Scalar | list[Scalar] | AttributeRange
-"""One value, a list of values (OR), or a range (design memo §3.10)."""
+"""One value, a list of values (OR), or a range."""
 
 
 class SearchFilter(BaseModel):
     """Lists mean OR; different fields combine with AND. `attributes` filters on manifest
-    attributes that their source's schema declares (design memo §3.10)."""
+    attributes that their source's schema declares."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -69,7 +69,7 @@ class KbCitation(BaseModel):
     origin_path: str | None = Field(
         default=None, description="For a file ingested into the sink: where it was copied from.")
     link: str | None = Field(default=None, description="The document's original URL, from its "
-                                                     "source's manifest (design memo §3.10).")
+                                                     "source's manifest.")
 
 
 class SideRanks(BaseModel):
@@ -92,7 +92,7 @@ class SearchHit(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     attributes: dict[str, Attribute] = Field(
         default_factory=dict, description="The document's manifest attributes, other than "
-                                          "`title` and `link` (design memo §3.10).")
+                                          "`title` and `link`.")
 
 
 class IndexDescription(BaseModel):

@@ -1,4 +1,4 @@
-"""The vectors of a kb, cached under `cache/vectors/` in partitions (design memo §3.3).
+"""The vectors of a kb, cached under `cache/vectors/` in partitions.
 
 Search scores chunk vectors by brute force. Pulling them out of SQLite on every query is
 slow, so they are cached as normalised float32 matrices (ruri-v3's vectors are not unit
@@ -40,12 +40,12 @@ import numpy as np
 from smartrag.index import SqliteIndex
 
 PARTITION_ROWS = 262_144
-"""Chunks per partition: 768 MB at 768 dimensions, 1 GB at 1,024 (design memo §3.3)."""
+"""Chunks per partition: 768 MB at 768 dimensions, 1 GB at 1,024."""
 
 GATHER_SHARE = 0.01
 """Under a filter, a partition in which at most this share of rows match has only those
-rows scored; above it, scoring the whole partition and masking is faster (measured
-2026-11-19: 1,200 scattered rows of a million, 0.7 ms; 5%, 291 ms; all, 61 ms)."""
+rows scored; above it, scoring the whole partition and masking is faster (measured on a
+million rows)."""
 
 _CACHE_SCHEMA = 3
 _DIR = "vectors"

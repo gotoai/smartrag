@@ -1,5 +1,4 @@
-"""Embedding requests in worker processes, for `embedding.parallelism` above 1 (design
-memo §3.11).
+"""Embedding requests in worker processes, for `embedding.parallelism` above 1.
 
 Only the requests run in parallel. The main process still lists, extracts and chunks
 serially, and alone reads and writes the index; a worker gets a batch of texts and

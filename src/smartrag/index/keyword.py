@@ -1,7 +1,7 @@
 """Text for the keyword index: NFKC, lowercase, Japanese split into character bigrams.
 
 FTS5's trigram tokenizer cannot match two-character words, and Japanese is full of them
-(休暇, 契約, 規程); tested in Kari's bundled SQLite 3.53.1 (design memo §3.3). So each run
+(休暇, 契約, 規程); tested with SQLite 3.53.1. So each run
 of Japanese characters becomes overlapping bigrams, separated by spaces, and FTS5's
 `unicode61` tokenizer splits on those spaces. Latin words and numbers stay whole.
 

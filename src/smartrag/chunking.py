@@ -1,4 +1,4 @@
-"""Packing extracted units into chunks (design: SmartRAG_design §3.4, chunking notes).
+"""Packing extracted units into chunks.
 
 * The document's **canonical text** is its units joined by newlines; a chunk is a span
   `[start, end)` of it, so snippets, highlights and neighbour expansion need no copy.
@@ -21,8 +21,8 @@
   a single sentence that is still too long is cut into windows that overlap slightly.
 * A small last chunk is merged into the one before it when they belong together.
 
-**Token counts are estimates** until the embedding profile's own tokenizer is available
-(OumiGo prerequisite #8): Japanese characters count 1/1.5 token each and other characters
+**Token counts are estimates** until the embedding model's own tokenizer is available:
+Japanese characters count 1/1.5 token each and other characters
 1/4, which errs towards smaller chunks. `TOKEN_ESTIMATOR` is part of the pipeline version.
 """
 

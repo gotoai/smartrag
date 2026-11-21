@@ -1,42 +1,45 @@
-# Smart RAG's embedding provider catalog (design memo §3.2, Appendix C).
+# Smart RAG's embedding provider catalog.
 #
 # A kb's config names a provider and one of its models; everything else comes from here.
-# Fixed per provider: the URL (except oumigo and custom), the authentication, the dialect
+# Fixed per provider: the URL (except gotoai and custom), the authentication, the dialect
 # and the request limits. Prices are USD per 1M input tokens.
 #
-# First wave (2026-11-16): oumigo, voyage_ai, openai, google_gemini, custom. Second wave
-# (2026-11-17): cohere. Mistral, added the same day, is out of v1 (2026-11-19); its
-# OpenAI-compatible API is still reachable through `custom`. Values marked VERIFY are
-# settled by live API calls before the entry is final (Appendix C).
+# Providers: gotoai, voyage_ai, openai, google_gemini, cohere, mistral, custom. 
+# Values marked VERIFY are settled by live API calls before the entry is final.
 
-oumigo:
-  title: OumiGo
-  base_url_env: OUMIGO_EMBED_BASE_URL
-  api_key_env: OUMIGO_EMBED_API_KEY
+
+gotoai:
+  title: GotoAI
+  base_url_env: GOTOAI_EMBED_BASE_URL
+  api_key_env: GOTOAI_EMBED_API_KEY
   dialect:
     wire: openai
     auth: bearer
     # The router applies each profile's own prompts for input_type.
     marking: {kind: field, field: input_type, query: query, document: document}
-  # OumiGo sets no per-request cap; this is Smart RAG's own batch_size bound.
+  # The endpoint (OumiGo) sets no per-request cap; this is Smart RAG's own batch_size bound.
   max_inputs: 2048
-  data_terms: Self-hosted; text goes only to the OumiGo deployment you configure.
-  checked: '2026-11-16'
+  data_terms: Text goes only to the GotoAI endpoint you configure, GotoAI's or your own OumiGo deployment.
+  # GotoAI serves byte-identical mirrors of the vendors' repos; the vector space keeps the
+  # vendor's id, so the vectors are the same as the vendor model's.
   models:
     ruri-v3-310m@8k:
-      canonical_name: cl-nagoya/ruri-v3-310m
+      canonical_name: GotoAI-Inc/ruri-v3-310m-mirror
+      compatibility_id: cl-nagoya/ruri-v3-310m
       dimensions: 768
       max_input_tokens: 8192
     harrier-oss-v1-0.6b@8k:
-      canonical_name: microsoft/harrier-oss-v1-0.6b
+      canonical_name: GotoAI-Inc/harrier-oss-v1-0.6b-mirror
+      compatibility_id: microsoft/harrier-oss-v1-0.6b
       dimensions: 1024
       max_input_tokens: 8192
     harrier-oss-v1-0.6b@32k:
-      canonical_name: microsoft/harrier-oss-v1-0.6b
+      canonical_name: GotoAI-Inc/harrier-oss-v1-0.6b-mirror
+      compatibility_id: microsoft/harrier-oss-v1-0.6b
       dimensions: 1024
       max_input_tokens: 32768
 
-voyage_ai:  # live-tested 2026-11-16: voyage-4-lite at 1024 dimensions
+voyage_ai:
   title: Voyage AI
   base_url: https://api.voyageai.com/v1
   api_key_env: VOYAGE_API_KEY
@@ -50,7 +53,6 @@ voyage_ai:  # live-tested 2026-11-16: voyage-4-lite at 1024 dimensions
   data_terms: >-
     Uses API data for training by default; opting out needs a payment method and an
     org admin (https://docs.voyageai.com/docs/faq).
-  checked: '2026-11-11'
   models:
     voyage-4:
       canonical_name: '@voyageai/voyage-4'
@@ -77,7 +79,7 @@ voyage_ai:  # live-tested 2026-11-16: voyage-4-lite at 1024 dimensions
       max_request_tokens: 120000
       price: 0.12
 
-openai:  # live-tested 2026-11-16: text-embedding-3-small
+openai:
   title: OpenAI
   base_url: https://api.openai.com/v1
   api_key_env: OPENAI_API_KEY
@@ -92,7 +94,6 @@ openai:  # live-tested 2026-11-16: text-embedding-3-small
   data_terms: >-
     API data is not used for training
     (https://developers.openai.com/api/docs/guides/your-data).
-  checked: '2026-11-11'
   models:
     text-embedding-3-small:
       canonical_name: '@openai/text-embedding-3-small'
@@ -107,7 +108,7 @@ openai:  # live-tested 2026-11-16: text-embedding-3-small
       max_input_tokens: 8191
       price: 0.13
 
-google_gemini:  # live-tested 2026-11-16: gemini-embedding-2 at 3072 dimensions
+google_gemini:
   title: Google Gemini
   base_url: https://generativelanguage.googleapis.com/v1beta/openai
   api_key_env: GEMINI_API_KEY
@@ -121,7 +122,6 @@ google_gemini:  # live-tested 2026-11-16: gemini-embedding-2 at 3072 dimensions
   data_terms: >-
     Paid-tier keys only: free-tier content is used to improve Google's products
     (https://aistudio.google.com/docs/pricing).
-  checked: '2026-11-11'
   models:
     gemini-embedding-2:
       canonical_name: '@google/gemini-embedding-2'
@@ -150,7 +150,6 @@ cohere:
   data_terms: >-
     Uses API data for training unless the organisation opts out in the dashboard; trial
     keys are not for production (https://cohere.com/enterprise-data-commitments).
-  checked: '2026-11-17'
   models:
     embed-v5.0-pro:
       canonical_name: '@cohere/embed-v5.0-pro'
@@ -165,6 +164,29 @@ cohere:
       allowed_dimensions: [256, 512, 768, 1024, 1536, 2048]
       max_input_tokens: 128000
 
+mistral:
+  title: Mistral AI
+  base_url: https://api.mistral.ai/v1
+  api_key_env: MISTRAL_API_KEY
+  key_required: true
+  dialect:
+    wire: openai
+    auth: bearer
+    marking: {kind: none}
+  # Mistral publishes no per-request limits for embeddings; these are Smart RAG's own
+  # bounds.
+  max_inputs: 2048
+  max_request_tokens: 16000
+  data_terms: >-
+    Training on API data depends on the plan: Scale is opted out by default, others can
+    opt out in the Admin Console (https://help.mistral.ai/en/articles/455207).
+  models:
+    mistral-embed:
+      canonical_name: '@mistralai/mistral-embed'
+      dimensions: 1024
+      max_input_tokens: 8192
+      price: 0.10
+
 custom:
   title: Custom OpenAI-compatible endpoint
   base_url_env: SMARTRAG_EMBED_BASE_URL
@@ -175,5 +197,4 @@ custom:
     marking: {kind: none}
   max_inputs: 2048
   data_terms: Whatever the endpoint's operator states.
-  checked: '2026-11-16'
   models: {}

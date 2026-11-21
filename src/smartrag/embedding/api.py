@@ -1,4 +1,4 @@
-"""What the rest of Smart RAG calls: one provider-neutral API (design memo §3.2).
+"""What the rest of Smart RAG calls: one provider-neutral API.
 
 Sync, search and the MCP server see only `Embedder` and `open_embedder`; which provider
 answers, and how it wants queries and documents marked, stays behind them.

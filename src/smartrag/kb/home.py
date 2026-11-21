@@ -206,7 +206,7 @@ class Home:
 
     def verify(self, kb_id: str) -> KbVerified:
         """One short test embedding through the kb's provider and model: checks the URL,
-        the key, the model and the vector size (design memo §3.2)."""
+        the key, the model and the vector size."""
         from smartrag.embedding.api import open_embedder
 
         config = self.load(kb_id)

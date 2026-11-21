@@ -1,4 +1,4 @@
-"""`source apply`: manifest attributes (design memo §3.10)."""
+"""`source apply`: manifest attributes."""
 
 from __future__ import annotations
 

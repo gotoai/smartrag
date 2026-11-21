@@ -6,12 +6,12 @@
 * `--rebuild`: build a fresh index **beside** the live one, carry the sources' manifests
   over, then swap it in. Search keeps
   working on the old index meanwhile, and a failed or interrupted rebuild leaves it intact.
-  **A stopped rebuild is continued** by the next `--rebuild` (2026-11-17): its partial
+  **A stopped rebuild is continued** by the next `--rebuild`: its partial
   index (`index.db.rebuild`) is kept, every document in it is saved whole, and the next run
   skips what is already done, so vectors a slow or rate-limited provider was paid for are
   not paid for twice. A partial index in another vector space (the kb's model changed
   since) is discarded instead; one built by an older pipeline has those documents redone.
-  It is also how a kb moves to another vector space (design memo §3.2): the new index
+  It is also how a kb moves to another vector space: the new index
   holds only the new space's vectors. When the space is unchanged, the old index lends its
   vectors, so a rebuild does not pay to embed everything again. An index built by an older
   smartrag (an older schema) is rebuilt the same way; its manifests are carried over.
@@ -123,7 +123,7 @@ def _resumable(fresh: Path, space: str) -> int | None:
 
 
 def _carry_manifests(live: Path, fresh: Path) -> None:
-    """Manifests are not rebuilt from the sources: copy them over (design memo §3.10)."""
+    """Manifests are not rebuilt from the sources: copy them over."""
     if not live.is_file():
         return
     old, new = SqliteIndex.open(live, readonly=True, any_schema=True), SqliteIndex.open(fresh)

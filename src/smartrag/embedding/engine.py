@@ -1,4 +1,4 @@
-"""The one generic embedder: the same five steps for every provider (design memo §3.2).
+"""The one generic embedder: the same five steps for every provider.
 
 resolve (done before) → mark → batch → send → read back. Batches respect the provider's
 inputs per request and the model's tokens per request; token counts are Smart RAG's

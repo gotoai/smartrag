@@ -4,7 +4,7 @@ These models are both the Web API's wire format and what a `RetrievalEngine` ret
 so the contract is defined once. Request models forbid unknown fields: a typo such as
 `filter` for `filters` must fail loudly, not silently search without the filter.
 
-Ids are stable (design memo §1.2, P3):
+Ids are stable:
 
 * `doc_id` — never changes for one file in one source.
 * `chunk_id` — `<doc_id>:v<version>:c<ordinal>`; tied to one version of the document,
@@ -42,8 +42,8 @@ class Citation(BaseModel):
 
 
 class IndexInfo(BaseModel):
-    """Which embedding model produced the vectors (an OumiGo profile id, e.g.
-    `ruri-v3-310m@8k`). Results from a different model are a different vector space."""
+    """Which embedding model produced the vectors (the provider's model profile id,
+    e.g. `ruri-v3-310m@8k`). Results from a different model are a different vector space."""
 
     embedding_model: str | None = None
     languages: list[str] = Field(default_factory=list)

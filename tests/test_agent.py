@@ -1,4 +1,4 @@
-"""The agent's view of a home (design memo §3.9): usable kbs only, no paths, fail fast."""
+"""The agent's view of a home: usable kbs only, no paths, fail fast."""
 
 from __future__ import annotations
 
@@ -173,8 +173,8 @@ def test_endpoint_down_degrades_with_a_fixed_sentence_and_fails_fast(agent_home)
 
 
 def test_a_missing_endpoint_falls_back_to_keyword_search(agent_home, monkeypatch):
-    monkeypatch.delenv("OUMIGO_EMBED_BASE_URL", raising=False)
-    monkeypatch.delenv("OUMIGO_EMBED_API_KEY", raising=False)
+    monkeypatch.delenv("GOTOAI_EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("GOTOAI_EMBED_API_KEY", raising=False)
     r = AgentService(agent_home).search("legal", "賃金")
     assert r.search_mode == "keyword" and r.results
 

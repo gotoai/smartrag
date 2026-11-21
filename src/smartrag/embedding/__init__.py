@@ -1,4 +1,4 @@
-"""Embeddings: a provider catalog, one API, and dialects as data (design memo §3.2).
+"""Embeddings: a provider catalog, one API, and dialects as data.
 
 | Module | Role |
 |---|---|

@@ -8,8 +8,8 @@ JSON file that the CLI writes, so the query server never holds a plaintext key:
 The file is re-read when it changes, so a key issued or revoked by the CLI takes effect
 without restarting the server.
 
-`X-SmartRAG-On-Behalf-Of: <user id>` names the end user an agent or UI acts for
-(design memo §1.2, P2). Only keys with `delegate: true` may send it; v1 logs it and passes it to
+`X-SmartRAG-On-Behalf-Of: <user id>` names the end user an agent or UI acts for.
+Only keys with `delegate: true` may send it; v1 logs it and passes it to
 the engine, and document permissions will use it later.
 """
 

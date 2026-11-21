@@ -1,9 +1,12 @@
-"""What an agent receives (design memo §3.9).
+"""What an agent receives.
 
 These are projections of the library's models, not new contracts: the same search and
-read, with everything an agent does not need, or must not see, left out. In particular
-no path of any kind: a citation names the source, the title and the place in the
-document, and Kari resolves `(kb_id, doc_id)` to the file when the user opens it.
+read, with everything an agent does not need, or must not see, left out. A citation
+names the source, the title and the place in the document, and gives the document's full
+path (`file_path`) and its manifest `link`, so the user can open or find it. A kb whose
+folder names or intranet hosts are themselves sensitive sets `agent.show_paths: false`, and
+then neither is given. The path relative to the source is never given, since `file_path`
+contains it, and error messages never carry paths.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Which kbs an agent sees, and what `describe_sources` tells it (design memo §3.9).
+"""Which kbs an agent sees, and what `describe_sources` tells it.
 
 An agent sees only usable kbs: local, indexed with at least one document, in the
 vector space its config's model gives, and described. Managing kbs is not the agent's
@@ -129,7 +129,7 @@ def _attribute_info(keys: list[str], schema: dict[str, Any] | None,
 
 
 def _attribute_filters(store: SqliteIndex, agent: AgentConfig) -> list[FilterInfo]:
-    """The allow-listed attributes search can filter on (design memo §3.10), with their
+    """The allow-listed attributes search can filter on, with their
     values when there are few."""
     keys = filterable_keys(store)
     return [FilterInfo(name=f"attributes.{name}", type=key.type, format=key.format,

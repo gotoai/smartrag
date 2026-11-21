@@ -1,4 +1,4 @@
-"""The agent's four operations over one home: what the MCP server exposes (memo §3.9).
+"""The agent's four operations over one home: what the MCP server exposes.
 
     list_kbs()                     usable kbs: id and description only
     describe_sources(kb_id)        sources, file types, dates, freshness, filters
@@ -67,7 +67,7 @@ def _citation(citation: KbCitation, agent: AgentConfig) -> AgentCitation:
 
 def _attributes(attributes: Mapping[str, Attribute], agent: AgentConfig) -> dict[str, Attribute]:
     """Only what the kb's config allow-lists: the manifest never decides what an agent
-    sees (design memo §3.10)."""
+    sees."""
     return {key: attributes[key] for key in agent.attributes if key in attributes}
 
 
