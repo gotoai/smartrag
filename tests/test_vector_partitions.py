@@ -10,7 +10,6 @@ import pytest
 from smartrag.index import SqliteIndex
 from smartrag.search import vectors
 from smartrag.search.vectors import (
-    carry_forward,
     load_vectors,
     refresh_after_write,
     refresh_vectors,
@@ -188,16 +187,6 @@ def test_search_uses_the_listed_cache_until_the_index_changes(small, store, tmp_
     _add(store, "b", 1)
     assert load_vectors(store, tmp_path / "cache", SPACE).rows == 4
     assert refreshed == [1]
-
-
-def test_source_apply_carries_the_cache_forward(store, tmp_path):
-    _add(store, "a", 3)
-    refresh_vectors(store, tmp_path / "cache", SPACE)
-    generation = store.generation()
-    store.bump_generation()
-    carry_forward(tmp_path / "cache", generation, store.generation())
-    listing = json.loads((tmp_path / "cache" / "vectors" / "parts.json").read_text())
-    assert listing["generation"] == store.generation()
 
 
 def test_writers_prune_and_searches_do_not(small, store, tmp_path):

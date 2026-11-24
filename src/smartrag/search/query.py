@@ -18,7 +18,7 @@ import re
 import time
 import unicodedata
 import uuid
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 
@@ -54,10 +54,7 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
               cursor: str | None = None, search_mode: SearchMode = "hybrid",
               group_by: GroupBy = "chunk", max_per_doc: int = 3,
               filters: SearchFilter | None = None, include: Iterable[str] = (),
-              snippet_chars: int = 300, embedder: Embedder | None = None,
-              visible_attributes: Collection[str] | None = None) -> KbSearchResponse:
-    """`visible_attributes` limits the attributes `filters` may name (an agent's
-    allow-list); `None` allows every one a schema declares."""
+              snippet_chars: int = 300, embedder: Embedder | None = None) -> KbSearchResponse:
     started = time.monotonic()
     filters = filters or SearchFilter()
     include = set(include)
@@ -76,7 +73,7 @@ def search_kb(home: Home, kb_id: str, query: str, *, limit: int = 10, page: int 
         where, args = filter_sql(filters)
         if filters.attributes:
             clause, extra = documents_clause(
-                matching_documents(kb.store, filters.attributes, visible_attributes))
+                matching_documents(kb.store, filters.attributes))
             where, args = f"{where} AND {clause}", args + extra
 
         keyword: list[int] = []
@@ -223,12 +220,12 @@ def _hydrate(kb: OpenKb, window: list[tuple[int, float, SideRanks]], offset: int
         f"substr(ct.text, c.start + 1, c.end - c.start) AS text "
         f"FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
         f"JOIN contents ct ON ct.content_hash = d.content_hash WHERE c.id IN ({marks})", ids)}
-    manifest = kb.manifest((row["source_id"], row["rel_path"]) for row in rows.values())
+    attributes = kb.attributes((row["source_id"], row["rel_path"]) for row in rows.values())
     terms = query_terms(query)
     hits = []
     for position, (rowid, score, ranks) in enumerate(window, offset + 1):
         row = rows[rowid]
-        doc = manifest.get((row["source_id"], row["rel_path"]))
+        doc = attributes.get((row["source_id"], row["rel_path"]))
         text = str(row["text"])
         snippet, highlights = make_snippet(text, terms, snippet_chars)
         prefix = str(row["prefix"] or "")

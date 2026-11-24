@@ -3,6 +3,9 @@
 For each source (and the sink):
 
 1. **List** every file, the way `source test` walks.
+   Then read each source's **attributes** folder (`<folder>.attributes/`, beside the
+   source folder) and replace its attributes if they changed, before any document is
+   written, so no document appears without them (`smartrag.kb.attributes`).
 2. **Skip what has not changed**: same size and modification time, built by the current
    pipeline version. A file whose timestamp moved but whose bytes did not (same content
    hash) is only re-stamped.
@@ -60,6 +63,7 @@ from smartrag.extract.tabular import ExtractError
 from smartrag.extract.units import EXTRACTOR_VERSION, Extracted, extract
 from smartrag.index import LEXIFY_VERSION, SqliteIndex, lexify
 from smartrag.index.store import ChunkRow, DocumentRow, unpack_vector
+from smartrag.kb.attributes import normalize_path, sync_attributes
 from smartrag.kb.config import SINK_ID, KbConfig
 from smartrag.kb.embed_pool import EmbedPool
 from smartrag.kb.home import INDEX_FILE, Home
@@ -175,6 +179,12 @@ class _Run:
         self._emit(event="source", source=target.source, files=len(listing.files),
                    complete=listing.complete)
         return listing
+
+    def apply_attributes(self, target: SyncTarget, listing: Listing) -> None:
+        files = ({normalize_path(listed.rel) for listed in listing.files}
+                 if listing.complete else None)
+        self.report.attributes.append(sync_attributes(
+            self.store, target.source, target.root, files, dry_run=self.report.dry_run))
 
     def sync_target(self, target: SyncTarget, listing: Listing) -> None:
         info = SourceSync(source=target.source, root=str(target.root), files=len(listing.files),
@@ -443,10 +453,12 @@ class _Run:
     def sweep_removed_sources(self, configured: set[str]) -> None:
         if self.store is None:
             return
-        for source in sorted(self.store.source_ids() - configured):
+        for source in sorted((self.store.source_ids() | set(self.store.attribute_sets()))
+                             - configured):
             rows = self.store.documents(source)
             if not self.report.dry_run:
                 self.store.delete_documents(row.doc_id for row in rows.values())
+                self.store.delete_attributes(source)
             self.report.sources.append(SourceSync(
                 source=source, root="", files=0, removed=len(rows),
                 note="no longer a source of this kb; its documents were removed"))
@@ -568,6 +580,9 @@ def _execute(run: _Run, targets: list[SyncTarget], source: str | None) -> None:
     try:
         # Every source is listed before any is processed, so `plan` can give the total.
         listings = [(target, run.list_target(target)) for target in targets]
+        for target, listing in listings:
+            if target.source != SINK_ID:
+                run.apply_attributes(target, listing)
         run._emit(event="plan", files=sum(len(listing.files) for _t, listing in listings))
         for target, listing in listings:
             run.sync_target(target, listing)

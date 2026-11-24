@@ -353,22 +353,6 @@ def refresh_after_write(index_path: Path, cache_dir: Path, space: str) -> None:
         store.close()
 
 
-def carry_forward(cache_dir: Path, generation: int, new_generation: int) -> None:
-    """After a write that changed no chunk (`source apply`), mark a cache that was current
-    at `generation` as current at `new_generation`, instead of checking it again."""
-    folder = cache_dir / _DIR
-    data = _read_list(folder)
-    if not data or data.get("generation") != generation:
-        return
-    data["generation"] = new_generation
-    try:
-        tmp = folder / f".{_LIST}-{os.getpid()}.tmp"
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, folder / _LIST)
-    except OSError:
-        pass
-
-
 class QueryVectorCache:
     def __init__(self, cache_dir: Path) -> None:
         self.path = cache_dir / "query_vectors.db"

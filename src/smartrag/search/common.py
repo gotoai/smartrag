@@ -13,9 +13,9 @@ from typing import Any
 from smartrag.embedding.resolve import resolve
 from smartrag.errors import ConfigError, CursorExpired, IndexNotReady, InvalidRequest
 from smartrag.index import SqliteIndex
+from smartrag.kb.attributes import normalize_path
 from smartrag.kb.config import KbConfig
 from smartrag.kb.home import INDEX_FILE, Home
-from smartrag.kb.manifest import normalize_path
 from smartrag.search.models import SearchFilter
 
 
@@ -34,8 +34,8 @@ class OpenKb:
     def close(self) -> None:
         self.store.close()
 
-    def manifest(self, docs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], DocAttributes]:
-        """Manifest attributes for `(source_id, rel_path)` pairs."""
+    def attributes(self, docs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], DocAttributes]:
+        """Attributes for `(source_id, rel_path)` pairs."""
         keys = {doc: (doc[0], normalize_path(doc[1])) for doc in set(docs)}
         rows = self.store.attributes(keys.values())
         found: dict[tuple[str, str], DocAttributes] = {}

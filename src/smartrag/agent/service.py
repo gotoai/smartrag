@@ -29,7 +29,6 @@ from smartrag.agent.models import (
     AgentReadChunk,
     AgentReadResponse,
     AgentSearchResponse,
-    Attribute,
     KbDescription,
     ReadScope,
 )
@@ -62,13 +61,7 @@ def _citation(citation: KbCitation, agent: AgentConfig) -> AgentCitation:
                          page=citation.page,
                          page_end=citation.page_end, location=citation.location,
                          heading_path=citation.heading_path,
-                         link=citation.link if agent.show_paths else None)
-
-
-def _attributes(attributes: Mapping[str, Attribute], agent: AgentConfig) -> dict[str, Attribute]:
-    """Only what the kb's config allow-lists: the manifest never decides what an agent
-    sees."""
-    return {key: attributes[key] for key in agent.attributes if key in attributes}
+                         link=citation.link)
 
 
 def _moment(value: str | None, name: str) -> datetime | None:
@@ -121,8 +114,7 @@ class AgentService:
                                modified_before=_moment(modified_before, "modified_before"),
                                attributes=conditions)
         r = search_kb(self.home, kb_id, query, limit=k, cursor=cursor, filters=filters,
-                      embedder=self.embedders.get(kb_id, config.embedding),
-                      visible_attributes=config.agent.attributes)
+                      embedder=self.embedders.get(kb_id, config.embedding))
         return AgentSearchResponse(
             kb_id=kb_id, query_id=r.query_id, query=r.query,
             search_mode="keyword" if r.search_mode == "keyword" else "hybrid",
@@ -131,7 +123,7 @@ class AgentService:
                               citation=_citation(h.citation, config.agent),
                               indexed_at=h.indexed_at,
                               file_type=h.metadata.get("file_type", ""),
-                              attributes=_attributes(h.attributes, config.agent))
+                              attributes=h.attributes)
                      for h in r.results],
             next_cursor=r.next_cursor)
 
@@ -144,7 +136,7 @@ class AgentService:
         return AgentReadResponse(
             kb_id=kb_id, chunk_id=r.chunk_id, doc_id=r.doc_id, scope=r.scope,
             title=safe_title(r.title), citation=_citation(r.citation, agent),
-            attributes=_attributes(r.attributes, agent), indexed_at=r.indexed_at,
+            attributes=r.attributes, indexed_at=r.indexed_at,
             chunks=[AgentReadChunk(chunk_id=c.chunk_id, ordinal=c.ordinal, text=c.text,
                                    prefix=c.prefix, heading_path=c.heading_path, page=c.page,
                                    page_end=c.page_end, location=c.location)

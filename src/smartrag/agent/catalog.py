@@ -26,7 +26,7 @@ from smartrag.agent.models import (
 from smartrag.embedding.resolve import resolve
 from smartrag.errors import NotFound
 from smartrag.index import SqliteIndex
-from smartrag.kb.config import MAX_DESCRIPTION, AgentConfig
+from smartrag.kb.config import MAX_DESCRIPTION
 from smartrag.kb.home import INDEX_FILE, Home
 from smartrag.search.attributes import filterable_keys, key_values
 
@@ -67,9 +67,8 @@ class AgentCatalog:
                 "GROUP BY source_id, file_type ORDER BY source_id, file_type").fetchall()
             as_of = store.meta("last_sync_at") or store.db.execute(
                 "SELECT MAX(indexed_at) FROM documents").fetchone()[0]
-            manifests = store.manifests()
-            agent = self.home.load(kb_id).agent
-            attribute_filters = _attribute_filters(store, agent)
+            applied = store.attribute_sets()
+            attribute_filters = _attribute_filters(store)
         finally:
             store.close()
         sources: dict[str, SourceSummary] = {}
@@ -82,9 +81,9 @@ class AgentCatalog:
             summary.modified_from = min(filter(None, (summary.modified_from, first)), default=None)
             summary.modified_to = max(filter(None, (summary.modified_to, last)), default=None)
         for source_id, summary in sources.items():
-            manifest = manifests.get(source_id)
-            if manifest is not None:
-                summary.attributes = _attribute_info(manifest.keys, manifest.schema, agent)
+            attributes = applied.get(source_id)
+            if attributes is not None:
+                summary.attributes = _attribute_info(attributes.keys, attributes.schema)
         types = sorted({t for s in sources.values() for t in s.file_types})
         dates = "YYYY-MM-DD, or an ISO datetime"
         return KbDescription(
@@ -119,24 +118,23 @@ class AgentCatalog:
         return AgentKb(kb_id=kb_id, description=description)
 
 
-def _attribute_info(keys: list[str], schema: dict[str, Any] | None,
-                    agent: AgentConfig) -> list[AttributeInfo]:
-    """What an agent may see of a source's manifest: `title`, `link` while paths are
-    shown, and the allow-listed keys, each with its schema's meaning when there is one."""
-    shown = ["title"] + (["link"] if agent.show_paths else []) + agent.attributes
-    properties = (schema or {}).get("properties", {})
-    return [AttributeInfo(name=key, **properties.get(key, {})) for key in shown if key in keys]
+def _attribute_info(keys: list[str], schema: dict[str, Any]) -> list[AttributeInfo]:
+    """A source's attributes, `title` and `link` first, each with its schema's meaning."""
+    properties = schema.get("properties", {})
+    ordered = [k for k in ("title", "link") if k in keys] + \
+        [k for k in keys if k not in ("title", "link")]
+    return [AttributeInfo(name=key, **{f: v for f, v in properties.get(key, {}).items()
+                                       if f in ("type", "format", "description")})
+            for key in ordered]
 
 
-def _attribute_filters(store: SqliteIndex, agent: AgentConfig) -> list[FilterInfo]:
-    """The allow-listed attributes search can filter on, with their
-    values when there are few."""
+def _attribute_filters(store: SqliteIndex) -> list[FilterInfo]:
+    """The attributes search can filter on, with their values when there are few."""
     keys = filterable_keys(store)
     return [FilterInfo(name=f"attributes.{name}", type=key.type, format=key.format,
                        shapes=key.shapes, description=key.description,
                        values=key_values(store, key))
-            for name in agent.attributes
-            if (key := keys.get(name)) is not None and not key.conflict]
+            for name, key in sorted(keys.items()) if not key.conflict]
 
 
 def _day(mtime_ns: int | None) -> str | None:

@@ -108,7 +108,6 @@ smartrag version
 | [`source add`](#source-add) | Register a folder or file for `kb sync` to follow |
 | [`source remove`](#source-remove) | Unregister a source and remove its documents |
 | [`source test`](#source-test) | Show which files a sync of a source would read |
-| [`source apply`](#source-apply) | Set or delete a source's document attributes |
 | [`provider list`](#provider-list) | List the embedding providers and models |
 
 ### kb commands
@@ -224,6 +223,8 @@ Brings the index in line with the sources: indexes files that are new or changed
 last sync, and removes the documents whose files are gone or no longer match the source's
 `include`/`exclude` patterns, and those of sources no longer registered. Unchanged files
 are not read again. An interrupted sync (exit 130) continues where it stopped when run again.
+Before any file, it reads each source's attributes folder and applies it if it changed (see
+[Attributes](#attributes)).
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -246,7 +247,8 @@ embedding so far and their rate per hour over the last stretch. The bar counts f
 large file holds it still while its chunks are embedded. The tokens are the provider's own
 count; a provider that gives none is counted by Smart RAG's estimate, and the figure starts
 with `~`. Reused vectors cost nothing and are not counted. The summary's `tokens` line
-gives the total and says whether the provider counted it.
+gives the total and says whether the provider counted it, and an `attributes` line per
+source says what was applied and what was skipped.
 
 Not on a terminal: one line per document, with its tokens
 (`[812/36063] data/yuho/…/S100U9OX.md: added, 157 chunks, 58,210 tokens`). With
@@ -336,14 +338,14 @@ answer.
 | `--path PREFIX` | – | Only files whose path inside their source's folder starts with `PREFIX`; end it with `/` to mean a folder. The text output prints `SID/PATH`: give only the `PATH` part. For `kitei/人事/就業規則.pdf`, that is `--path 人事/` |
 | `--modified-after DATE` | – | Files last modified at or after `DATE` (local time): `2026-04-01`, `2026-04-01T09:00:00` or `"2026-04-01 09:00:00"` |
 | `--modified-before DATE` | – | Files last modified before `DATE` (not including it) |
-| `--attr FILTER…` | – | Manifest attributes, see below |
+| `--attr FILTER…` | – | Attributes, see below |
 | `--include highlights\|text…` | none | Extra fields: `highlights` (the start and end of each match in the snippet, for programs), `text` (the whole chunk). Repeat for both |
 | `--snippet-chars N` | `300` | Snippet length in characters, 50–2000 |
 
 Different filters combine with AND: `--source kitei --type pdf` means PDFs of `kitei`.
 
-`--attr` filters on a document's manifest attributes (see [Manifests](#manifests-source-apply));
-only attributes that the source's schema declares can be used.
+`--attr` filters on a document's attributes (see [Attributes](#attributes)). Every
+attribute can be used; one the source's `schema.json` does not declare is a string.
 
 | `FILTER` | Matches documents whose attribute |
 |---|---|
@@ -356,8 +358,8 @@ Different keys combine with AND. A range cannot be combined with other values of
 
 Text output, per result: its rank, title, page or sheet location and outline path (OPath),
 and which side found it (`keyword 1 · vector 3` are its ranks there); the snippet; the
-source and file path and the `chunk` id (for `kb read`); the manifest link and attributes,
-if any. When the embedding endpoint cannot be reached, a `note:` line says that the
+source and file path and the `chunk` id (for `kb read`); the link and attributes, if
+any. When the embedding endpoint cannot be reached, a `note:` line says that the
 results are keyword-only.
 
 ```sh
@@ -433,15 +435,16 @@ separators, ignoring case. They must not start with `/`.
 | `*` | Any characters within one folder or file name |
 | `?` | One character, not `/` |
 | `**/` | Zero or more folders: `**/*.pdf` is every PDF at any depth, including the top folder |
-| `**` at the end | Everything below: `_manifest/**` is everything in `_manifest/`, which is then not even walked |
+| `**` at the end | Everything below: `drafts/**` is everything in `drafts/`, which is then not even walked |
 | `[abc]`, `[!abc]` | One of these characters, or none of them |
 
 Some files are always skipped, whatever the patterns: secrets (`.env`, keys, `.ssh`), tool
-folders (`.git`, `node_modules`, `.venv`) and lock files. `source list` prints the full list.
+folders (`.git`, `node_modules`, `.venv`), lock files and attributes folders (`*.attributes`).
+`source list` prints the full list.
 
 ```sh
 smartrag run source add --kb legal --source kitei ~/Documents/規程 --include '**/*.pdf' --include '**/*.docx'
-smartrag run source add --kb edinet --source filings /data/EDINET_DATA/rag --exclude '_manifest/**'
+smartrag run source add --kb edinet --source data /data/EDINET_DATA/rag/data --exclude 'drafts/**'
 smartrag run source add --kb legal --source share /mnt/legal-share --allow-missing=true
 ```
 
@@ -473,23 +476,6 @@ the matching paths. Run it after `source add`, or after editing a source's patte
 smartrag run source test --kb edinet --source filings --sample 20
 ```
 
-#### `source apply`
-
-```
-smartrag run source apply --kb ID --source SID --manifest FILE… [--schema FILE] [--dry-run]
-smartrag run source apply --kb ID --source SID --clear [--dry-run]
-```
-
-The first form sets the attributes (`title`, `link` and your own keys) of the source's
-documents from a manifest, replacing the source's previous manifest. The second form
-deletes the source's manifest. Both are explained under [Manifests](#manifests-source-apply).
-
-```sh
-smartrag run source apply --kb edinet --source filings --manifest manifest.jsonl --schema schema.json --dry-run
-smartrag run source apply --kb edinet --source filings --manifest manifest.jsonl --schema schema.json
-smartrag run source apply --kb edinet --source filings --clear
-```
-
 ### `provider list`
 
 ```
@@ -513,46 +499,69 @@ json` gives the same as data.
   indexed as plain text when its first 8 KiB are text, so source code and configuration
   files need no list.
 
-### Manifests (`source apply`)
+### Attributes
 
-A manifest gives a source's documents attributes that are not in the files themselves, such
-as a company code or a fiscal year. Keep manifest files outside the source's folder, or
-exclude them in the source's `exclude` patterns; otherwise a sync indexes them as documents.
+Attributes are facts about a document that are not in the file itself, such as a company
+code or a fiscal year. Whoever publishes the files (for example the program that downloaded
+them) writes them into a folder **beside** the source folder, named after it with
+`.attributes` added:
 
-- **The manifest file** is JSON Lines: one JSON object per line, one line per document.
-  `path` is required: the file's path relative to the source's root folder, with `/`
-  separators. Every other key is an attribute:
+```
+rag/
+├── data/                  the source folder (source add … rag/data)
+└── data.attributes/
+    ├── attributes.jsonl   required
+    └── schema.json        optional
+```
+
+Every `kb sync` and `kb reindex` reads this folder and applies it if it changed; there is no
+separate command, and the location cannot be changed. A source without such a folder has no
+attributes. The folder is never indexed as documents, even by a source that contains it.
+Files ingested into the sink have no attributes.
+
+**Agents see every attribute.** Whatever `attributes.jsonl` holds is shown to agents with
+each search result, and can go from there to the model's provider and into answers. Leave
+out anything agents should not see.
+
+- **`attributes.jsonl`** is JSON Lines: one JSON object per line, one line per document.
+  `path` is required: the file's path relative to the source folder, with `/` separators.
+  Every other key is an attribute:
   ```json
   {"path": "yuho/7203_トヨタ自動車/2026-03期_有価証券報告書_S100Y8NY.md", "title": "トヨタ自動車 有価証券報告書 2026年3月期", "link": "https://example.com/S100Y8NY", "sec_code": "7203", "fiscal_year_end": "2026-03-31"}
   ```
-  `title` and `link` are reserved: `title` replaces the document's extracted title in search
-  results and citations, and `link` becomes the citation's link.
-- **`--manifest FILE`** can be given more than once. The files are read together as one
-  manifest.
-- **`--schema FILE`** is a JSON Schema subset that gives each attribute a `type` (`string`,
-  `integer`, `number` or `boolean`), optionally a `format` for strings (`date`, `date-time`
-  or `uri`), and optionally a `description`. Only attributes the schema declares can be
-  used as search filters (`kb search --attr`, the MCP `attributes` argument). With a
-  schema, a manifest key the schema does not declare is an error. Without `--schema`, the
-  attributes are stored and shown, but none of them can be used as a filter.
-- **Each apply replaces the source's whole manifest.** The rows and schema of the previous
-  apply are deleted, including rows for documents that the new manifest does not list. To
-  change one document's attributes, apply the complete manifest again.
-- **All or nothing.** If any line is invalid (not a JSON object, no `path`, a value of the
-  wrong type, a key the schema does not declare), nothing is changed, and up to 20 problems
-  are listed with their file and line number.
-- **Nothing is re-extracted or re-embedded**, so an apply takes seconds. A row whose file is
-  not indexed yet is kept, and applies once a sync indexes that file. The output counts the
-  rows that matched an indexed document, the rows still waiting for their file, and the
-  indexed documents that have no row.
-- **`--clear`** deletes the source's manifest: all its rows and its schema. Give it alone,
-  without `--manifest` or `--schema`. The documents and their chunks stay in the index;
-  their search results show the extracted title (or the file name) again and have no link,
-  and attribute filters no longer match them.
-- **`--dry-run`** checks the manifest and the schema, prints the same counts, and changes
-  nothing. With `--clear`, it prints how many rows would be deleted.
-- **Agents** see an attribute only if the kb's `agent.attributes` lists it (see
-  [MCP server](#mcp-server-agents)).
+  `title` replaces the document's extracted title in search results and citations, and
+  `link` (an `http` or `https` URL) becomes the citation's link. Values are a string,
+  number, boolean or `null`, at most 500 characters; lists and objects are not accepted.
+- **`schema.json`** says what each attribute is, in a subset of JSON Schema: per property
+  a `type` (`string`, `integer`, `number` or `boolean`), optionally a `format` for strings
+  (`date`, `date-time` or `uri`), an `enum` of allowed values, and a `description` (up to
+  200 characters; a longer one is cut). Other JSON Schema keywords are ignored.
+- **Every attribute can be a search filter** (`kb search --attr`, the MCP `attributes`
+  argument); its type decides whether ranges work. A key the schema does not declare, or
+  every key when there is no `schema.json`, is a string: `7203` is read as `"7203"` and
+  `true` as `"true"`.
+- **Reserved names.** Attribute names Smart RAG uses for its own result fields (`doc_id`,
+  `chunk_id`, `kb_id`, `source_id`, `file_path`, `file_type`, `page`, `text` and a few more)
+  are renamed with the prefix `_attr_`: `doc_id` becomes `_attr_doc_id`. A name of your own
+  must not start with `_attr_`.
+- **A mistake skips only the bad part.** A line that is not a JSON object, has no or a bad
+  `path`, repeats an earlier path, or names a file the source does not have is skipped. A
+  value that is nested, too long, or does not match the schema is dropped, and the rest of
+  its line is kept.
+- **If `attributes.jsonl` cannot be read at all** (for example while it is being rewritten),
+  the attributes applied before are kept. A `schema.json` that cannot be read is ignored on
+  its own. Deleting the folder removes the source's attributes at the next sync.
+- **Nothing is re-extracted or re-embedded** when only attributes change, so that sync takes
+  seconds.
+
+The sync summary has one `attributes` line per source, followed by what was renamed and
+skipped:
+
+```
+attributes data: 36,060 rows applied
+           renamed doc_id to _attr_doc_id: Smart RAG uses the name
+           3 lines skipped: not valid JSON (812, 9051, 20113)
+```
 
 ## Extraction
 
@@ -641,8 +650,8 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
 | Tool | Purpose |
 |---|---|
 | `list_kbs()` | The usable kbs: `kb_id` and description only |
-| `describe_sources(kb_id)` | Sources, file types, date range, last sync; the filters `search` accepts, allow-listed manifest attributes included |
-| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before, attributes)` | Hybrid search: passages with snippets and citations, never an answer. `attributes` filters on manifest attributes: a value, a list, or `{from, to}` |
+| `describe_sources(kb_id)` | Sources, file types, date range, last sync; each source's attributes and what they mean; the filters `search` accepts |
+| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before, attributes)` | Hybrid search: passages with snippets and citations, never an answer. `attributes` filters on attributes: a value, a list, or `{from, to}` |
 | `read(kb_id, chunk_id, scope, cursor)` | A passage widened to `neighbors`, its `section` or the `document`, in pages |
 
 - **Read-only.** Agents never sync, ingest or change a kb.
@@ -650,10 +659,11 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
   configured model's vector space, and with a description. The set is fixed at startup (it is
   in the server instructions and the `kb_id` enum) and re-checked on every call; any other
   kb id is refused as `not_found`. `--allow-kb` narrows it further.
-- **Citations carry the document's full path** (`file_path`) and its manifest `link`, unless
-  the kb's config sets `agent.show_paths: false`; error messages never carry paths. Titles
-  are cut to file names. Manifest attributes reach agents only when `agent.attributes` in
-  the kb's config lists them.
+- **Citations carry the document's full path** (`file_path`), unless the kb's config sets
+  `agent.show_paths: false`, and its `link`; error messages never carry paths. Titles are
+  cut to file names.
+- **Agents see every attribute** of a document, as the publisher wrote it (see
+  [Attributes](#attributes)).
 - **Embedding endpoint down:** keyword results, with `search_mode` `keyword`. A query waits
   at most 10 s with one retry; after a failure the vector side is skipped for 60 s.
 - Always starts, even with no home or no usable kb. stdout carries only the protocol; logs

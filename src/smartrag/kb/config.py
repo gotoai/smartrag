@@ -237,26 +237,20 @@ class RemoteConfig(_Strict):
 
 
 class AgentConfig(_Strict):
-    """What agents see of this kb, beyond what they always see."""
+    """What agents see of this kb, beyond what they always see: every document's attributes,
+    including its `link` (`smartrag.kb.attributes`)."""
 
     show_paths: bool = True
-    """Give agents each document's full path, and its manifest `link`, in citations. Turn
-    off for a kb whose folder names or intranet hosts are themselves sensitive."""
-    attributes: list[str] = Field(default_factory=list)
-    """Manifest attributes agents may see. `title` is always shown and
-    `link` follows `show_paths`, so neither is listed."""
+    """Give agents each document's full path in citations. Turn off for a kb whose folder
+    names are themselves sensitive."""
 
-    @field_validator("attributes")
+    @model_validator(mode="before")
     @classmethod
-    def _plain_keys(cls, value: list[str]) -> list[str]:
-        keys = [key.strip() for key in value]
-        for key in keys:
-            if not key:
-                raise ValueError("agent.attributes has an empty name")
-            if key in ("path", "title", "link"):
-                raise ValueError(f"agent.attributes cannot list {key!r}: `title` is always "
-                                 "shown, `link` follows show_paths, `path` is not an attribute")
-        return list(dict.fromkeys(keys))
+    def _no_attribute_list(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "attributes" in data:
+            raise ValueError("agent.attributes is no longer used: agents see every attribute "
+                             "in a source's attributes folder; remove the line")
+        return data
 
 
 class KbConfig(_Strict):
@@ -493,9 +487,9 @@ class ConfigDocument:
                                   "add|remove`, or by hand.")
             data["agent"] = CommentedMap(model.agent.model_dump(mode="json"))
             data.yaml_set_comment_before_after_key(
-                "agent", before="What agents see. show_paths: each document's full path and "
-                                "link in citations; false for a kb whose folder names are "
-                                "sensitive. attributes: manifest attributes agents may see.")
+                "agent", before="What agents see beyond every document's attributes. "
+                                "show_paths: each document's full path in citations; false "
+                                "for a kb whose folder names are sensitive.")
         document = cls(path, data, model)
         document._revalidate()
         return document

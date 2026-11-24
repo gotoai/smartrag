@@ -68,6 +68,8 @@ BUILTIN_EXCLUDE = [
     "**/go.sum",
     "**/*.min.js",
     "**/*.min.css",
+    # Attributes folders: what a publisher says about documents, not documents themselves.
+    "**/*.attributes/**",
     # Secrets: never sent to an embedding provider or shown to an agent.
     "**/.env",
     "**/.env.*",

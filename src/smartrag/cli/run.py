@@ -38,7 +38,6 @@ from smartrag.errors import NotFound, SmartRAGError
 from smartrag.kb import Home, add_source, list_sources, remove_source, resolve_home, test_source
 from smartrag.kb.config import CONFIG_FILE, DEFAULT_MODEL, DEFAULT_PROVIDER
 from smartrag.kb.ingest import IngestReport, ingest_files
-from smartrag.kb.manifest import apply_manifest, clear_manifest
 from smartrag.kb.models import (
     KbCreated,
     KbList,
@@ -46,7 +45,6 @@ from smartrag.kb.models import (
     KbStatus,
     KbUpdated,
     KbVerified,
-    ManifestApplied,
     SourceAdded,
     SourceList,
     SourceRemoved,
@@ -426,7 +424,7 @@ def kb_search(
     modified_before: datetime = typer.Option(None, "--modified-before", formats=_DATE_FORMATS,
                                              help="Files modified before this date."),
     attr: list[str] = typer.Option(None, "--attr",
-                                   help="Only documents with this manifest attribute: "
+                                   help="Only documents with this attribute: "
                                         "KEY=VALUE, or KEY=FROM..TO for a number or date "
                                         "(both ends included). Repeating a key means OR."),
     include: list[IncludeOption] = typer.Option(None, "--include",
@@ -537,35 +535,6 @@ def source_remove(
         return remove_source(state.home, kb, source)
 
     invoke(state, action, _render_source_removed)
-
-
-@source_app.command("apply")
-def source_apply(
-    ctx: typer.Context,
-    kb: str = typer.Option(..., "--kb", help="The kb's id."),
-    source: str = typer.Option(..., "--source", help="The source's id."),
-    manifest: list[Path] = typer.Option(
-        None, "--manifest", help="A JSONL manifest: one document per line, with `path` "
-                                 "relative to the source root. Repeatable; applied as one."),
-    schema: Path = typer.Option(None, "--schema",
-                                help="What each attribute means: a JSON Schema subset."),
-    clear: bool = typer.Option(False, "--clear", help="Remove the source's manifest."),
-    dry_run: bool = typer.Option(False, "--dry-run",
-                                 help="Validate and count matches; change nothing."),
-) -> None:
-    """Replace a source's document attributes (title, link and others) from a manifest.
-    All or nothing; nothing is re-extracted or re-embedded."""
-    state = _state(ctx)
-    if clear and (manifest or schema):
-        raise typer.BadParameter("give --clear alone, without --manifest or --schema",
-                                 param_hint="--clear")
-    if not clear and not manifest:
-        raise typer.BadParameter("give --manifest (repeatable), or --clear",
-                                 param_hint="--manifest")
-    invoke(state, lambda: clear_manifest(state.home, kb, source, dry_run=dry_run) if clear
-           else apply_manifest(state.home, kb, source, manifest, schema=schema,
-                               dry_run=dry_run),
-           _render_manifest_applied)
 
 
 @source_app.command("test")
@@ -750,6 +719,7 @@ def _render_sync(r: SyncReport) -> str:
         note = f": {s.note}" if s.note else ""
         lines.append(f"source     {s.source}: {s.files} files{state}"
                      + (f", {s.removed} removed" if s.removed else "") + note)
+    lines += _attributes_lines(r)
     if r.issues:
         lines.append("problems")
         lines += [f"  {i.status}: {i.source}/{i.path}: {i.reason}" for i in r.issues[:20]]
@@ -759,6 +729,29 @@ def _render_sync(r: SyncReport) -> str:
     if r.report_path:
         lines.append(f"report     {r.report_path}")
     return "\n".join(lines)
+
+
+def _attributes_lines(r: SyncReport) -> list[str]:
+    lines: list[str] = []
+    for a in r.attributes:
+        folder = Path(a.folder).name + "/"
+        if a.status == "none":
+            text = f"none (no {folder} beside the source folder)"
+        elif a.status == "removed":
+            text = f"{'would be removed' if r.dry_run else 'removed'}: {folder} is gone"
+        elif a.status == "kept":
+            text = "kept as applied before"
+        else:
+            verb = "would be applied" if r.dry_run and a.status == "applied" else a.status
+            text = (f"{a.rows:,} rows {verb}"
+                    + ("" if a.has_schema else ", no schema.json: every key read as a string")
+                    + (f"; {a.documents_without_row:,} files have no row"
+                       if a.documents_without_row else ""))
+        lines.append(f"attributes {a.source}: {text}")
+        lines += [f"           renamed {old} to {new}: Smart RAG uses the name"
+                  for old, new in a.renamed.items()]
+        lines += [f"           {warning}" for warning in a.warnings]
+    return lines
 
 
 def _pages(page: int | None, page_end: int | None) -> str:
@@ -873,34 +866,6 @@ def _render_source_removed(result: SourceRemoved) -> str:
     if result.documents_removed is not None:
         text += f" {result.documents_removed} documents were removed from the index."
     return f"{text}\n{result.note}" if result.note else text
-
-
-def _render_manifest_applied(r: ManifestApplied) -> str:
-    if r.cleared:
-        if r.note:
-            return f"Source {r.source!r} of kb {r.kb!r}: {r.note}; nothing to clear."
-        done = "would remove" if r.dry_run else "removed"
-        return (f"Source {r.source!r} of kb {r.kb!r}: {done} its manifest "
-                f"({r.previous_rows:,} rows).")
-    head = ("Would apply" if r.dry_run else "Applied") + (
-        f" {r.rows:,} rows to source {r.source!r} of kb {r.kb!r}"
-        f"{', with a schema' if r.has_schema else ''}"
-        f"{f', replacing {r.previous_rows:,} rows' if r.previous_rows else ''}.")
-    lines = [head, f"attributes  {', '.join(r.attributes) or '(none)'}"]
-    if r.documents is not None:
-        lines.append(f"matched     {r.matched:,} of {r.documents:,} indexed documents")
-        if r.documents_without_row:
-            lines.append(f"            {r.documents_without_row:,} documents have no row")
-    if r.rows_without_document:
-        lines.append(f"waiting     {r.rows_without_document:,} rows have no document yet "
-                     f"(e.g. {', '.join(r.unmatched_examples[:3])})"
-                     if r.unmatched_examples else
-                     f"waiting     {r.rows_without_document:,} rows have no document yet")
-    if r.note:
-        lines.append(r.note)
-    if r.dry_run:
-        lines.append("Nothing was changed (--dry-run).")
-    return "\n".join(lines)
 
 
 def _render_source_test(r: SourceTestReport) -> str:

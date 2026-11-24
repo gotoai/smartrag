@@ -1,4 +1,4 @@
-"""Filters on manifest attributes."""
+"""Filters on attributes."""
 
 from __future__ import annotations
 
@@ -10,11 +10,10 @@ from typer.testing import CliRunner
 from smartrag.agent import AgentService, QueryEmbedders
 from smartrag.errors import InvalidRequest
 from smartrag.kb import add_source
-from smartrag.kb.manifest import apply_manifest
 from smartrag.kb.sync import sync_kb
 from smartrag.search import SearchFilter, search_kb
 from smartrag.search.attributes import MAX_VALUES
-from tests.test_manifest import _allow, _write
+from tests.test_attributes import publish
 from tests.test_search_read import CharEmbedder
 
 ROWS = [
@@ -40,10 +39,8 @@ SCHEMA = {"type": "object", "properties": {
 
 @pytest.fixture
 def home(agent_home, tmp_path):
-    schema = tmp_path / "schema.json"
-    schema.write_text(json.dumps(SCHEMA, ensure_ascii=False), encoding="utf-8")
-    apply_manifest(agent_home, "legal", "docs", [_write(tmp_path / "m.jsonl", ROWS)],
-                   schema=schema)
+    publish(tmp_path / "docs", ROWS, SCHEMA)
+    sync_kb(agent_home, "legal", embedder=CharEmbedder())
     return agent_home
 
 
@@ -116,7 +113,7 @@ def test_cursors_bind_the_attribute_filters(home):
 
 
 @pytest.mark.parametrize(("attributes", "message"), [
-    ({"court": "東京地方裁判所"}, "'court' cannot be filtered on: it is not a filterable"),
+    ({"court": "東京地方裁判所"}, "'court' cannot be filtered on: no source has this"),
     ({"title": "x"}, "'title' cannot be filtered on"),
     ({"sec_code": {"from": "7000"}}, "is a string: give a value or a list, not a range"),
     ({"fiscal_year_end": "2026/03/31"}, "give a date as YYYY-MM-DD"),
@@ -133,10 +130,14 @@ def test_mistakes_fail_loudly(home, attributes, message):
         assert "fiscal_year_end" in caught.value.message  # names what can be filtered
 
 
-def test_a_key_without_a_schema_is_not_filterable(agent_home, tmp_path):
-    apply_manifest(agent_home, "legal", "docs", [_write(tmp_path / "m.jsonl", ROWS)])
-    with pytest.raises(InvalidRequest, match="filterable attributes are: none"):
-        _paths(agent_home, sec_code="7203")
+def test_without_a_schema_keys_are_filtered_as_strings(agent_home, tmp_path):
+    publish(tmp_path / "docs", ROWS)
+    sync_kb(agent_home, "legal", embedder=CharEmbedder())
+    assert _paths(agent_home, sec_code="7203") == {"tax/相続.md"}
+    assert _paths(agent_home, fiscal_year=2025) == {"tax/電子.md"}  # read as "2025"
+    assert _paths(agent_home, amended="true") == {"tax/電子.md"}
+    with pytest.raises(InvalidRequest, match="is a string: give a value or a list"):
+        _paths(agent_home, fiscal_year={"to": 2024})
 
 
 def test_two_schemas_must_agree_on_a_key(home, tmp_path):
@@ -144,15 +145,12 @@ def test_two_schemas_must_agree_on_a_key(home, tmp_path):
     other.mkdir()
     (other / "report.md").write_text("# 報告\n\n資料の報告。\n", encoding="utf-8")
     add_source(home, "legal", "other", str(other))
+    publish(other, [{"path": "report.md", "fiscal_year": "2026", "sec_code": "7203"}],
+            {"type": "object", "properties": {
+                "fiscal_year": {"type": "string"}, "sec_code": {"type": "string"}}})
     sync_kb(home, "legal", embedder=CharEmbedder())
-    schema = tmp_path / "other.json"
-    schema.write_text(json.dumps({"type": "object", "properties": {
-        "fiscal_year": {"type": "string"}, "sec_code": {"type": "string"}}}), encoding="utf-8")
-    rows = [{"path": "report.md", "fiscal_year": "2026", "sec_code": "7203"}]
-    apply_manifest(home, "legal", "other", [_write(tmp_path / "o.jsonl", rows)],
-                   schema=schema)
     assert _paths(home, sec_code="7203") == {"tax/相続.md", "report.md"}
-    with pytest.raises(InvalidRequest, match="declare it with different types"):
+    with pytest.raises(InvalidRequest, match="its sources give it different types"):
         _paths(home, fiscal_year=2026)
 
 
@@ -163,21 +161,21 @@ def _service(home):
     return AgentService(home, embedders=QueryEmbedders(lambda _config: CharEmbedder()))
 
 
-def test_agents_filter_only_on_allow_listed_keys(home):
-    _allow(home, ["sec_code", "fiscal_year_end"])
+def test_agents_filter_on_every_attribute(home):
     service = _service(home)
     r = service.search("legal", "資料", attributes={
         "sec_code": ["7203", "9064"], "fiscal_year_end": {"from": "2026-01-01"}})
     assert [h.attributes["sec_code"] for h in r.results] == ["7203"]
-    with pytest.raises(InvalidRequest, match="it is not a filterable attribute") as caught:
-        service.search("legal", "資料", attributes={"industry": "陸運業"})  # declared, hidden
-    assert "industry" not in caught.value.message.split("are:")[1]
+    r = service.search("legal", "資料", attributes={"industry": "陸運業"})
+    assert [h.attributes["sec_code"] for h in r.results] == ["9064"]
+    with pytest.raises(InvalidRequest, match="no source has this attribute") as caught:
+        service.search("legal", "資料", attributes={"court": "x"})
+    assert "industry" in caught.value.message.split("are:")[1]
     with pytest.raises(InvalidRequest, match="a value, a list of values"):
         service.search("legal", "資料", attributes={"sec_code": {"is": "7203"}})
 
 
 def test_describe_sources_lists_the_attribute_filters(home):
-    _allow(home, ["industry", "fiscal_year_end", "amended"])
     filters = {f.name: f for f in _service(home).describe_sources("legal").filters}
     industry = filters["attributes.industry"]
     assert (industry.type, industry.shapes, industry.description) == (
@@ -187,7 +185,7 @@ def test_describe_sources_lists_the_attribute_filters(home):
     assert (date.format, date.shapes, date.values) == ("date", ["value", "list", "range"],
                                                        None)
     assert filters["attributes.amended"].values == [False, True]
-    assert "attributes.sec_code" not in filters  # not allow-listed
+    assert filters["attributes.sec_code"].values is not None  # three codes: listed
 
 
 async def test_mcp_search_takes_an_attributes_object(home):
@@ -195,7 +193,6 @@ async def test_mcp_search_takes_an_attributes_object(home):
 
     from smartrag.mcp import build_server
 
-    _allow(home, ["sec_code"])
     server = build_server(home, embedders=QueryEmbedders(lambda _config: CharEmbedder()))
     async with Client(server) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
@@ -206,8 +203,8 @@ async def test_mcp_search_takes_an_attributes_object(home):
         assert {r["attributes"]["sec_code"] for r in found.structured_content["results"]} == {
             "9064"}
         refused = await client.call_tool("search", {"kb_id": "legal", "query": "資料",
-                                                    "attributes": {"industry": "陸運業"}})
-        assert refused.is_error and "not a filterable attribute" in refused.content[0].text
+                                                    "attributes": {"court": "x"}})
+        assert refused.is_error and "no source has this attribute" in refused.content[0].text
 
 
 # --- CLI ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
-"""Filters on manifest attributes.
+"""Filters on attributes (`smartrag.kb.attributes`).
 
-A key is filterable when its source's schema declares it; the declared type decides what a
-filter can say. Strings and booleans take one value or a list; numbers and dates also take
+Every attribute key is filterable: the schema's type decides what a filter can say, and a
+key the schema does not declare is a string. Strings and booleans take one value or a list; numbers and dates also take
 a range, both ends included. A date-time attribute is matched on the date it is written
-with. Lists mean OR, keys combine with AND, and a document matches only when its manifest
-row has a matching value: no row, no key or `null` never matches.
+with. Lists mean OR, keys combine with AND, and a document matches only when its
+attributes have a matching value: no row, no key or `null` never matches.
 
 Matching runs before ranking. The documents a filter leaves are found first, from the
-manifest rows (JSON, read with SQLite's JSON functions) joined to documents by NFC path,
+attribute rows (JSON, read with SQLite's JSON functions) joined to documents by NFC path,
 and the search's WHERE clause then reads their ids, so both the keyword and the vector
 side rank only their chunks.
 """
@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from smartrag.errors import InvalidRequest
 from smartrag.index import SqliteIndex
+from smartrag.kb.attributes import ROLES, is_date, normalize_path
 from smartrag.kb.home import Home
-from smartrag.kb.manifest import RESERVED, is_date, normalize_path
 from smartrag.search.common import open_kb
 from smartrag.search.models import AttributeCondition, AttributeRange, Scalar
 
@@ -37,7 +37,7 @@ industries fit, the 4,169 securities codes do not."""
 
 @dataclass
 class FilterableKey:
-    """A key some sources' schemas declare, with the type they agree on."""
+    """A key some sources' attributes have, with the type they agree on."""
 
     name: str
     type: str
@@ -45,7 +45,7 @@ class FilterableKey:
     description: str | None
     sources: list[str] = field(default_factory=list)
     conflict: bool = False
-    """Two schemas declare the key with different types or formats: not filterable."""
+    """Two sources give the key different types or formats: not filterable."""
 
     @property
     def ranges(self) -> bool:
@@ -59,11 +59,12 @@ class FilterableKey:
 
 
 def filterable_keys(store: SqliteIndex) -> dict[str, FilterableKey]:
-    """Every key a source's schema declares, except the reserved display keys."""
+    """Every key a source's attributes have, except `title` and `link`, which are display
+    text."""
     keys: dict[str, FilterableKey] = {}
-    for source_id, manifest in store.manifests().items():
-        for name, spec in ((manifest.schema or {}).get("properties") or {}).items():
-            if name in RESERVED or '"' in name:  # a `"` cannot be quoted in a JSON path
+    for source_id, applied in store.attribute_sets().items():
+        for name, spec in (applied.schema.get("properties") or {}).items():
+            if name in ROLES or '"' in name:  # a `"` cannot be quoted in a JSON path
                 continue
             key = keys.get(name)
             if key is None:
@@ -81,7 +82,7 @@ def key_values(store: SqliteIndex, key: FilterableKey) -> list[Scalar] | None:
         return None
     marks = ",".join("?" * len(key.sources))
     rows = store.db.execute(
-        f"SELECT DISTINCT {_value(key)} AS v FROM manifest_rows "
+        f"SELECT DISTINCT {_value(key)} AS v FROM attribute_rows "
         f"WHERE source_id IN ({marks}) AND v IS NOT NULL ORDER BY v LIMIT ?",
         (*key.sources, MAX_LISTED_VALUES + 1)).fetchall()
     if len(rows) > MAX_LISTED_VALUES:
@@ -89,20 +90,18 @@ def key_values(store: SqliteIndex, key: FilterableKey) -> list[Scalar] | None:
     return [bool(row[0]) if key.type == "boolean" else row[0] for row in rows]
 
 
-def matching_documents(store: SqliteIndex, conditions: Mapping[str, AttributeCondition],
-                       visible: Collection[str] | None = None) -> list[str]:
-    """The ids of the documents every condition matches. `visible` limits the keys that
-    may be used (an agent's allow-list); `None` allows every declared key."""
+def matching_documents(store: SqliteIndex,
+                       conditions: Mapping[str, AttributeCondition]) -> list[str]:
+    """The ids of the documents every condition matches."""
     keys = filterable_keys(store)
-    usable = {name: key for name, key in keys.items()
-              if not key.conflict and (visible is None or name in visible)}
+    usable = {name: key for name, key in keys.items() if not key.conflict}
     clauses: list[str] = []
     args: list[object] = []
     sources: set[str] | None = None
     for name, condition in conditions.items():
         key = usable.get(name)
         if key is None:
-            raise _not_filterable(name, keys, usable, visible)
+            raise _not_filterable(name, keys, usable)
         clause, values = _clause(key, condition)
         clauses.append(clause)
         args += values
@@ -113,7 +112,7 @@ def matching_documents(store: SqliteIndex, conditions: Mapping[str, AttributeCon
     docs: list[str] = []
     for source_id in sorted(sources):
         paths = {row[0] for row in store.db.execute(
-            f"SELECT path FROM manifest_rows WHERE source_id = ? AND {where}",
+            f"SELECT path FROM attribute_rows WHERE source_id = ? AND {where}",
             (source_id, *args))}
         if not paths:
             continue
@@ -214,13 +213,10 @@ def _kind(key: FilterableKey) -> str:
 
 
 def _not_filterable(name: str, keys: Mapping[str, FilterableKey],
-                    usable: Mapping[str, FilterableKey],
-                    visible: Collection[str] | None) -> InvalidRequest:
-    """The same refusal for a key no schema declares and one the caller may not see."""
+                    usable: Mapping[str, FilterableKey]) -> InvalidRequest:
     known = ", ".join(sorted(usable)) or "none"
-    seen = name in keys and (visible is None or name in visible)
-    reason = ("its sources' schemas declare it with different types"
-              if seen and keys[name].conflict else "it is not a filterable attribute")
+    reason = ("its sources give it different types" if name in keys and keys[name].conflict
+              else "no source has this attribute")
     return InvalidRequest(f"attribute {name!r} cannot be filtered on: {reason}; the "
                           f"filterable attributes are: {known}",
                           {"attribute": name, "filterable": known})

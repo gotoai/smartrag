@@ -3,10 +3,11 @@
 These are projections of the library's models, not new contracts: the same search and
 read, with everything an agent does not need, or must not see, left out. A citation
 names the source, the title and the place in the document, and gives the document's full
-path (`file_path`) and its manifest `link`, so the user can open or find it. A kb whose
-folder names or intranet hosts are themselves sensitive sets `agent.show_paths: false`, and
-then neither is given. The path relative to the source is never given, since `file_path`
-contains it, and error messages never carry paths.
+path (`file_path`) and its `link` from the document's attributes, so the user can open or
+find it. A kb whose folder names are themselves sensitive sets `agent.show_paths: false`,
+and then `file_path` is not given; `link`, like every attribute, is the publisher's to
+disclose. The path relative to the source is never given, since `file_path` contains it,
+and error messages never carry paths.
 """
 
 from __future__ import annotations

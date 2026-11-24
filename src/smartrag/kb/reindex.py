@@ -3,8 +3,8 @@
 * `--refresh-stale-only`: re-process exactly the documents whose pipeline version (extractor,
   chunking, normalisation) is older than the current one. New and deleted files are left
   for the next `kb sync`. (A plain sync does this too, along with everything else.)
-* `--rebuild`: build a fresh index **beside** the live one, carry the sources' manifests
-  over, then swap it in. Search keeps
+* `--rebuild`: build a fresh index **beside** the live one, then swap it in. Its
+  attributes come from the sources' attributes folders, as in a sync. Search keeps
   working on the old index meanwhile, and a failed or interrupted rebuild leaves it intact.
   **A stopped rebuild is continued** by the next `--rebuild`: its partial
   index (`index.db.rebuild`) is kept, every document in it is saved whole, and the next run
@@ -14,7 +14,7 @@
   It is also how a kb moves to another vector space: the new index
   holds only the new space's vectors. When the space is unchanged, the old index lends its
   vectors, so a rebuild does not pay to embed everything again. An index built by an older
-  smartrag (an older schema) is rebuilt the same way; its manifests are carried over.
+  smartrag (an older schema) is rebuilt the same way.
 
 The rebuilt index continues the old one's generation counter rather than starting at zero,
 so no cursor or cached vector matrix from the old index can be mistaken for the new one's.
@@ -97,7 +97,6 @@ def reindex_rebuild(home: Home, kb_id: str, *, dry_run: bool = False,
                             "use. Run `kb reindex --rebuild` again to continue where this "
                             "one stopped")
             return _finish(report, started, kb_dir / "runs")
-        _carry_manifests(live, fresh)
         _swap(live, fresh)
         refresh_after_write(live, kb_dir / "cache", report.vector_space)
         return _finish(report, started, kb_dir / "runs")
@@ -120,18 +119,6 @@ def _resumable(fresh: Path, space: str) -> int | None:
         return None
     finally:
         store.close()
-
-
-def _carry_manifests(live: Path, fresh: Path) -> None:
-    """Manifests are not rebuilt from the sources: copy them over."""
-    if not live.is_file():
-        return
-    old, new = SqliteIndex.open(live, readonly=True, any_schema=True), SqliteIndex.open(fresh)
-    try:
-        new.copy_manifests_from(old)
-    finally:
-        old.close()
-        new.close()
 
 
 def _swap(live: Path, fresh: Path) -> None:

@@ -146,28 +146,28 @@ class SourceRemoved(BaseModel):
     note: str | None = None
 
 
-class ManifestApplied(BaseModel):
-    """`source apply`: what a manifest matched, or would match with `--dry-run`."""
+class AttributesSync(BaseModel):
+    """What `sync` (or `reindex`) did with one source's attributes folder."""
 
-    kb: str
     source: str
-    dry_run: bool = False
-    cleared: bool = Field(default=False, description="`--clear`: the manifest was removed.")
-    rows: int = 0
-    attributes: list[str] = Field(default_factory=list,
-                                  description="The attribute keys the rows use.")
-    has_schema: bool = Field(default=False,
-                             description="Whether a schema was applied with the rows.")
-    previous_rows: int = Field(default=0, description="Rows in the manifest replaced.")
-    documents: int | None = Field(default=None,
-                                  description="The source's indexed documents; None before "
-                                              "the first sync.")
-    matched: int = 0
-    rows_without_document: int = 0
+    folder: str
+    status: Literal["applied", "unchanged", "removed", "kept", "none"] = Field(
+        description="applied: read and written (a dry run: would be); unchanged: same as "
+                    "applied before; removed: the folder is gone, so were the attributes; "
+                    "kept: the rows file could not be read, or the listing was incomplete, "
+                    "so the attributes applied before stay; none: no folder.")
+    rows: int = Field(default=0, description="Rows read and matched to a file.")
+    keys: list[str] = Field(default_factory=list, description="The attribute names, as "
+                                                                "stored (escaped).")
+    has_schema: bool = False
+    renamed: dict[str, str] = Field(default_factory=dict, description="Names that clash with "
+                                    "Smart RAG's own fields, and what they became.")
+    untyped: list[str] = Field(default_factory=list, description="Keys the schema does not "
+                               "declare (all, without one): read as strings.")
+    skipped_lines: int = 0
+    dropped_values: int = 0
     documents_without_row: int = 0
-    unmatched_examples: list[str] = Field(default_factory=list,
-                                          description="Up to five rows with no document.")
-    note: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PathError(BaseModel):
@@ -254,6 +254,8 @@ class SyncReport(BaseModel):
     rate_limit_wait_ms: int = 0
     """Time spent waiting out rate limits, summed over the requests in flight."""
     sources: list[SourceSync] = Field(default_factory=list)
+    attributes: list[AttributesSync] = Field(default_factory=list)
+    """Per source, its attributes folder; the sink has none."""
     counts: SyncCounts = Field(default_factory=SyncCounts)
     chunks_written: int = 0
     chunks_embedded: int = 0

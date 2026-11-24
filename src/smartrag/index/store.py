@@ -9,8 +9,8 @@ One file, WAL mode, one writer (the sync, under the kb lock), any number of read
 | `contents` | each distinct extracted text once, keyed by the file's hash and the pipeline version that read it (identical files share it; a new extractor gets its own) |
 | `chunks` | spans of a document's text, their heading path and location, and their vector |
 | `chunk_fts` | FTS5, contentless, over bigram-split text: BM25 for the keyword side |
-| `manifests` | per source, the applied manifest's schema, attribute keys and row count |
-| `manifest_rows` | per source, each manifest row's attributes, keyed by the NFC-normalised path; joined to documents when results are built, so a file synced later gets its row |
+| `attribute_sets` | per source, the schema of its attributes (as applied: undeclared keys added as strings, clashing names escaped), their keys, row count and a digest |
+| `attribute_rows` | per source, each document's attributes, keyed by the NFC-normalised path; joined to documents when results are built |
 
 Vectors are float32 BLOBs. A chunk whose embedded text is unchanged keeps its vector
 across re-syncs (`vectors_for`), so editing one paragraph re-embeds one or two chunks.
@@ -18,7 +18,9 @@ Chunks are keyed on the vector space, not on the model profile: moving
 to another profile in the same space keeps every vector.
 
 Schema 2 replaced the profile with the vector space. An index of schema 1 is
-not migrated: `kb reindex --rebuild` builds a new one beside it.
+not migrated: `kb reindex --rebuild` builds a new one beside it. The attribute tables
+replaced two earlier ones in place, without a schema change: the first write drops those,
+and the next sync fills the new ones from the sources' attributes folders.
 """
 
 from __future__ import annotations
@@ -89,14 +91,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     content = '', contentless_delete = 1,
     tokenize = 'unicode61 remove_diacritics 2'
 );
-CREATE TABLE IF NOT EXISTS manifests (
+CREATE TABLE IF NOT EXISTS attribute_sets (
     source_id  TEXT PRIMARY KEY,
-    schema     TEXT,
+    schema     TEXT NOT NULL,
     keys       TEXT NOT NULL,
     rows       INTEGER NOT NULL,
+    digest     TEXT NOT NULL,
     applied_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS manifest_rows (
+CREATE TABLE IF NOT EXISTS attribute_rows (
     source_id  TEXT NOT NULL,
     path       TEXT NOT NULL,
     attributes TEXT NOT NULL,
@@ -147,11 +150,12 @@ class ChunkRow:
 
 
 @dataclass
-class ManifestInfo:
+class AttributeSet:
     source_id: str
-    schema: dict[str, Any] | None
+    schema: dict[str, Any]
     keys: list[str]
     rows: int
+    digest: str
     applied_at: str
 
 
@@ -171,12 +175,18 @@ class IndexStats(BaseModel):
 _ADDED_COLUMNS = {"documents": [("origin_path", "TEXT")]}
 
 
+#: Tables an earlier smartrag created and this one no longer reads: dropped on a write.
+_DROPPED_TABLES = ("manifest_rows", "manifests")
+
+
 def _add_missing_columns(connection: sqlite3.Connection) -> None:
     for table, columns in _ADDED_COLUMNS.items():
         present = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         for name, kind in columns:
             if name not in present:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+    for table in _DROPPED_TABLES:
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.commit()
 
 
@@ -216,7 +226,7 @@ class SqliteIndex:
     def open(cls, path: Path, *, readonly: bool = False,
              any_schema: bool = False) -> SqliteIndex:
         """`any_schema` (read-only) opens an index of an older schema, as a rebuild does to
-        carry its manifests over; anything else refuses it."""
+        lend its vectors; anything else refuses it."""
         if readonly:
             # Not `mode=ro`: a read-only connection to a WAL database cannot start when the
             # `-shm` file is absent, which is the normal state after the last writer closed.
@@ -368,53 +378,56 @@ class SqliteIndex:
         return count
 
     def delete_source(self, source_id: str) -> int:
-        """Remove a source's documents and its manifest."""
-        with self.db:
-            self.db.execute("DELETE FROM manifest_rows WHERE source_id = ?", (source_id,))
-            self.db.execute("DELETE FROM manifests WHERE source_id = ?", (source_id,))
+        """Remove a source's documents and its attributes."""
+        self.delete_attributes(source_id)
         return self.delete_documents(row.doc_id for row in self.documents(source_id).values())
 
-    # --- manifests ---------------------------------------------
+    # --- attributes --------------------------------------------
 
-    def replace_manifest(self, source_id: str, rows: Sequence[tuple[str, str]],
-                         schema: str | None, keys: Sequence[str], applied_at: str) -> None:
-        """Replace a source's manifest (no rows: remove it) and advance the generation,
-        in one transaction: readers see the old manifest or the new one, never a mix."""
+    def replace_attributes(self, source_id: str, rows: Sequence[tuple[str, str]],
+                           schema: str, keys: Sequence[str], digest: str,
+                           applied_at: str) -> None:
+        """Replace a source's attributes and advance the generation, in one transaction:
+        readers see the old set or the new one, never a mix."""
         with self.db:
-            self.db.execute("DELETE FROM manifest_rows WHERE source_id = ?", (source_id,))
-            self.db.execute("DELETE FROM manifests WHERE source_id = ?", (source_id,))
-            if rows:
-                self.db.executemany(
-                    "INSERT INTO manifest_rows (source_id, path, attributes) VALUES (?, ?, ?)",
-                    ((source_id, path, attributes) for path, attributes in rows))
-                self.db.execute(
-                    "INSERT INTO manifests (source_id, schema, keys, rows, applied_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (source_id, schema, json.dumps(list(keys), ensure_ascii=False), len(rows),
-                     applied_at))
+            self.db.execute("DELETE FROM attribute_rows WHERE source_id = ?", (source_id,))
+            self.db.execute("DELETE FROM attribute_sets WHERE source_id = ?", (source_id,))
+            self.db.executemany(
+                "INSERT INTO attribute_rows (source_id, path, attributes) VALUES (?, ?, ?)",
+                ((source_id, path, attributes) for path, attributes in rows))
+            self.db.execute(
+                "INSERT INTO attribute_sets (source_id, schema, keys, rows, digest, applied_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (source_id, schema, json.dumps(list(keys), ensure_ascii=False), len(rows),
+                 digest, applied_at))
             self.set_meta("generation", str(self.generation() + 1))
 
-    def manifests(self) -> dict[str, ManifestInfo]:
-        if not self.has_table("manifests"):
-            return {}
-        return {row["source_id"]: ManifestInfo(
-                    source_id=row["source_id"],
-                    schema=json.loads(row["schema"]) if row["schema"] else None,
-                    keys=json.loads(row["keys"]), rows=row["rows"],
-                    applied_at=row["applied_at"])
-                for row in self.db.execute("SELECT * FROM manifests ORDER BY source_id")}
+    def delete_attributes(self, source_id: str) -> bool:
+        """Remove a source's attributes; whether it had any. Advances the generation when
+        something was removed."""
+        if not self.has_table("attribute_sets"):
+            return False
+        with self.db:
+            self.db.execute("DELETE FROM attribute_rows WHERE source_id = ?", (source_id,))
+            removed = self.db.execute("DELETE FROM attribute_sets WHERE source_id = ?",
+                                      (source_id,)).rowcount
+            if removed:
+                self.set_meta("generation", str(self.generation() + 1))
+        return bool(removed)
 
-    def manifest_paths(self, source_id: str) -> set[str]:
-        if not self.has_table("manifest_rows"):
-            return set()
-        return {row[0] for row in self.db.execute(
-            "SELECT path FROM manifest_rows WHERE source_id = ?", (source_id,))}
+    def attribute_sets(self) -> dict[str, AttributeSet]:
+        if not self.has_table("attribute_sets"):
+            return {}
+        return {row["source_id"]: AttributeSet(
+                    source_id=row["source_id"], schema=json.loads(row["schema"]),
+                    keys=json.loads(row["keys"]), rows=row["rows"], digest=row["digest"],
+                    applied_at=row["applied_at"])
+                for row in self.db.execute("SELECT * FROM attribute_sets ORDER BY source_id")}
 
     def attributes(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
-        """Manifest attributes by `(source_id, NFC path)`; documents without a row are
-        absent."""
+        """Attributes by `(source_id, NFC path)`; documents without a row are absent."""
         wanted = list(set(keys))
-        if not wanted or not self.has_table("manifest_rows"):
+        if not wanted or not self.has_table("attribute_rows"):
             return {}
         found: dict[tuple[str, str], dict[str, Any]] = {}
         for i in range(0, len(wanted), 400):
@@ -422,27 +435,10 @@ class SqliteIndex:
             where = " OR ".join("(source_id = ? AND path = ?)" for _ in batch)
             args = [part for key in batch for part in key]
             for row in self.db.execute(
-                    f"SELECT source_id, path, attributes FROM manifest_rows WHERE {where}", args):
+                    f"SELECT source_id, path, attributes FROM attribute_rows WHERE {where}",
+                    args):
                 found[(row["source_id"], row["path"])] = json.loads(row["attributes"])
         return found
-
-    def copy_manifests_from(self, other: SqliteIndex) -> None:
-        """Carry every manifest over from another index (`reindex --rebuild`), without
-        advancing this index's generation."""
-        if not other.has_table("manifests"):
-            return
-        with self.db:
-            self.db.execute("DELETE FROM manifest_rows")
-            self.db.execute("DELETE FROM manifests")
-            self.db.executemany(
-                "INSERT INTO manifests (source_id, schema, keys, rows, applied_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (tuple(row) for row in other.db.execute(
-                    "SELECT source_id, schema, keys, rows, applied_at FROM manifests")))
-            self.db.executemany(
-                "INSERT INTO manifest_rows (source_id, path, attributes) VALUES (?, ?, ?)",
-                (tuple(row) for row in other.db.execute(
-                    "SELECT source_id, path, attributes FROM manifest_rows")))
 
     def collect_garbage(self) -> None:
         with self.db:

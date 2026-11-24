@@ -87,7 +87,7 @@ def read_chunk(home: Home, kb_id: str, chunk_id: str, *, scope: ReadScope = "chu
                 chunk_id=row["chunk_id"], ordinal=row["ordinal"], text=text,
                 prefix=row["prefix"] or "", heading_path=json.loads(row["heading_path"]),
                 page=row["page"], page_end=row["page_end"], location=row["location"]))
-        doc = kb.manifest([(anchor["source_id"], anchor["rel_path"])]).get(
+        doc = kb.attributes([(anchor["source_id"], anchor["rel_path"])]).get(
             (anchor["source_id"], anchor["rel_path"]))
         return KbReadResponse(
             kb=kb_id, chunk_id=chunk_id, doc_id=anchor["doc_id"], scope=scope,

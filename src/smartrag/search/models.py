@@ -36,8 +36,8 @@ AttributeCondition = Scalar | list[Scalar] | AttributeRange
 
 
 class SearchFilter(BaseModel):
-    """Lists mean OR; different fields combine with AND. `attributes` filters on manifest
-    attributes that their source's schema declares."""
+    """Lists mean OR; different fields combine with AND. `attributes` filters on the
+    documents' attributes (`smartrag.kb.attributes`)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -69,7 +69,7 @@ class KbCitation(BaseModel):
     origin_path: str | None = Field(
         default=None, description="For a file ingested into the sink: where it was copied from.")
     link: str | None = Field(default=None, description="The document's original URL, from its "
-                                                     "source's manifest.")
+                                                     "source's attributes.")
 
 
 class SideRanks(BaseModel):
@@ -91,8 +91,8 @@ class SearchHit(BaseModel):
     indexed_at: str
     metadata: dict[str, str] = Field(default_factory=dict)
     attributes: dict[str, Attribute] = Field(
-        default_factory=dict, description="The document's manifest attributes, other than "
-                                          "`title` and `link`.")
+        default_factory=dict, description="The document's attributes, other than `title` "
+                                          "and `link`.")
 
 
 class IndexDescription(BaseModel):
