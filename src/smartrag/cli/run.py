@@ -70,8 +70,11 @@ source_app = typer.Typer(help="A kb's sources: the folders `sync` follows.",
                          no_args_is_help=True)
 provider_app = typer.Typer(help="Embedding providers and their models (the catalog).",
                            no_args_is_help=True)
+table_app = typer.Typer(help="A kb's tables: the files and folders of rows `sync` imports.",
+                        no_args_is_help=True)
 run_app.add_typer(kb_app, name="kb")
 run_app.add_typer(source_app, name="source")
+run_app.add_typer(table_app, name="table")
 run_app.add_typer(provider_app, name="provider")
 
 
@@ -565,6 +568,139 @@ def source_test(
 # --- text rendering ------------------------------------------------------------------
 
 
+# --- table -------------------------------------------------------------------------
+
+
+@table_app.command("add")
+def table_add(
+    ctx: typer.Context,
+    location: str = typer.Argument(..., help="A file or folder of tables (CSV, TSV, Excel, "
+                                             "SQLite): a path or a file:// URI."),
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    allow_missing: TrueFalse = typer.Option(TrueFalse.false, "--allow-missing",
+                                            case_sensitive=False,
+                                            help="true: accept a path that does not exist now "
+                                                 "(e.g. a share that is not mounted)."),
+) -> None:
+    """Register a file or folder of tables; the next `kb sync` imports it."""
+    from smartrag.tables.manage import add_table
+
+    state = _state(ctx)
+    invoke(state, lambda: add_table(state.home, kb, location,
+                                    allow_missing=bool(allow_missing)),
+           lambda r: f"Added table location {r.uri} to kb {r.kb!r}; {r.note}.")
+
+
+@table_app.command("remove")
+def table_remove(
+    ctx: typer.Context,
+    location: str = typer.Argument(..., help="The location as it was added."),
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation."),
+) -> None:
+    """Unregister a table location and drop its tables. Its files are not touched."""
+    from smartrag.tables.manage import remove_table
+
+    state = _state(ctx)
+
+    def action() -> Any:
+        confirm(state, yes, f"Remove table location {location} and its tables from kb {kb!r}?")
+        return remove_table(state.home, kb, location)
+
+    invoke(state, action, lambda r: f"Removed table location {r.uri} from kb {r.kb!r}"
+           + (f"; dropped {len(r.tables_removed)} tables: {', '.join(r.tables_removed)}."
+              if r.tables_removed else "."))
+
+
+@table_app.command("list")
+def table_list(ctx: typer.Context, kb: str = typer.Option(..., "--kb", help="The kb's id.")
+               ) -> None:
+    """List a kb's table locations and the tables the last sync imported from them."""
+    from smartrag.tables.manage import list_tables
+
+    state = _state(ctx)
+    invoke(state, lambda: list_tables(state.home, kb), _render_table_list)
+
+
+def _render_table_list(result: Any) -> str:
+    if not result.entries and not result.tables:
+        return (f"kb {result.kb!r} has no table locations; add one with "
+                "`smartrag run table add`.")
+    lines: list[str] = []
+    by_name = {t.name: t for t in result.tables}
+    for entry in result.entries:
+        lines.append(entry.uri + ("" if entry.exists else "  (missing)"))
+        if not entry.tables:
+            lines.append("  (nothing imported yet: run `kb sync`)")
+        for name in entry.tables:
+            t = by_name[name]
+            lines.append(f"  {t.name}  {t.rows:,} rows, {len(t.columns)} columns  "
+                         f"from {t.original}")
+    return "\n".join(lines)
+
+
+@table_app.command("describe")
+def table_describe(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="The table's name, as `table list` gives it."),
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+) -> None:
+    """Show a table as an agent's describe_table sees it: each column's type, unit and
+    meaning, its profile, the columns that link to document attributes, and a few rows."""
+    from smartrag.tables.query import describe_table
+
+    state = _state(ctx)
+    invoke(state, lambda: describe_table(state.home, kb, name), _render_table_described)
+
+
+def _render_table_described(d: Any) -> str:
+    lines = [f"table      {d.name}", f"from       {d.file}" + (f" › {d.sheet}" if d.sheet else ""),
+             f"rows       {d.rows:,}", f"imported   {d.imported_at}"]
+    if d.description:
+        lines.append(f"meaning    {d.description}")
+    linked = {link.column: link.attribute for link in d.links}
+    rows = [[c.name + (f" ({c.original})" if c.original != c.name else ""),
+             c.type + (f" [{c.unit}]" if c.unit else ""), c.nulls, c.distinct,
+             c.min, c.max,
+             (f"→ attribute {linked[c.name]}; " if c.name in linked else "")
+             + (c.description or "")]
+            for c in d.columns]
+    lines += ["", table(["COLUMN", "TYPE", "NULLS", "DISTINCT", "MIN", "MAX", "MEANING"], rows)]
+    if d.sample:
+        lines += ["", "sample", table([c.name for c in d.columns], d.sample)]
+    if d.warnings:
+        lines += ["", "warnings", bullets(d.warnings)]
+    return "\n".join(lines)
+
+
+@kb_app.command("query")
+def kb_query(
+    ctx: typer.Context,
+    kb: str = typer.Option(..., "--kb", help="The kb's id."),
+    sql: str = typer.Option(..., "--sql", help="One read-only SQL statement (DuckDB)."),
+    max_rows: int = typer.Option(100, "--max-rows", help="Rows to show, 1-1000."),
+) -> None:
+    """Run read-only SQL over a kb's tables. The tables' names are in `table list`."""
+    from smartrag.tables.query import query_tables
+
+    state = _state(ctx)
+    invoke(state, lambda: query_tables(state.home, kb, sql, max_rows=max_rows),
+           _render_query)
+
+
+def _render_query(result: Any) -> str:
+    header = [c.name for c in result.columns]
+    lines = [table(header, result.rows)] if header else []
+    lines.append("")
+    lines.append(f"{result.row_count:,} rows" + (f", first {len(result.rows):,} shown"
+                                                if result.truncated else "")
+                 + f" in {result.took_ms} ms")
+    for t in result.tables:
+        lines.append(f"from {t.name}: {t.file}" + (f" › {t.sheet}" if t.sheet else "")
+                     + f", imported {t.imported_at}")
+    return "\n".join(lines)
+
+
 # --- provider ----------------------------------------------------------------------
 
 
@@ -706,6 +842,14 @@ def _render_kb_described(result: Any) -> str:
             elif values:
                 lines.append(f"    {'':<{width}}  {'':<9}  {len(values)} values "
                              "(listed with --format json)")
+    if result.tables:
+        lines += ["", "tables"]
+        for t in result.tables:
+            lines.append(f"  {t.name}  {t.rows:,} rows, {len(t.columns)} columns, from "
+                         f"{t.path}" + (f" › {t.sheet}" if t.sheet else ""))
+            if t.description:
+                lines.append(f"    {t.description}")
+        lines.append("  (columns: `smartrag run table describe`; SQL: `smartrag run kb query`)")
     return "\n".join(lines)
 
 
@@ -783,6 +927,7 @@ def _render_sync(r: SyncReport) -> str:
         lines.append(f"source     {s.source}: {s.files} files{state}"
                      + (f", {s.removed} removed" if s.removed else "") + note)
     lines += _attributes_lines(r)
+    lines += _tables_lines(r)
     if r.issues:
         lines.append("problems")
         lines += [f"  {i.status}: {i.source}/{i.path}: {i.reason}" for i in r.issues[:20]]
@@ -792,6 +937,24 @@ def _render_sync(r: SyncReport) -> str:
     if r.report_path:
         lines.append(f"report     {r.report_path}")
     return "\n".join(lines)
+
+
+def _tables_lines(r: SyncReport) -> list[str]:
+    lines: list[str] = []
+    counts: dict[str, int] = {}
+    for t in r.tables:
+        counts[t.status] = counts.get(t.status, 0) + 1
+    if counts:
+        order = ("added", "updated", "unchanged", "removed", "kept", "skipped")
+        lines.append("tables     " + ("(would be) " if r.dry_run else "")
+                     + ", ".join(f"{counts[s]} {s}" for s in order if s in counts))
+    for t in r.tables:
+        if t.status in ("added", "updated") or t.warnings:
+            lines.append(f"           {t.name} ({t.original}): {t.status}"
+                         + (f", {t.rows:,} rows, {t.columns} columns"
+                            if t.status in ("added", "updated") else ""))
+            lines += [f"             {w}" for w in t.warnings]
+    return lines
 
 
 def _attributes_lines(r: SyncReport) -> list[str]:

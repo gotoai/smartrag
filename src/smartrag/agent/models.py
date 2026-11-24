@@ -74,6 +74,21 @@ class KbDescription(BaseModel):
     documents: int
     sources: list[SourceSummary]
     filters: list[FilterInfo] = Field(description="The filters `search` accepts.")
+    tables: list[str] = Field(default_factory=list, description="Tables for SQL: "
+                              "list_tables, describe_table, query.")
+
+
+class AgentTable(BaseModel):
+    name: str = Field(description="As SQL names it.")
+    description: str | None = None
+    rows: int
+    columns: int
+    origin: str = Field(description="The file it came from, and the sheet or table in it.")
+
+
+class AgentTableList(BaseModel):
+    kb_id: str
+    tables: list[AgentTable]
 
 
 class AgentCitation(BaseModel):

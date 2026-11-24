@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, PrivateAttr
 
 from smartrag.kb.lock import LockHolder
+from smartrag.tables.models import TableSync
 
 KbKind = Literal["local", "remote"]
 
@@ -255,6 +256,8 @@ class SyncReport(BaseModel):
     """Time spent waiting out rate limits, summed over the requests in flight."""
     sources: list[SourceSync] = Field(default_factory=list)
     attributes: list[AttributesSync] = Field(default_factory=list)
+    tables: list[TableSync] = Field(default_factory=list)
+    """What the sync did with each table (`smartrag.tables`); none with `--source`."""
     """Per source, its attributes folder; the sink has none."""
     counts: SyncCounts = Field(default_factory=SyncCounts)
     chunks_written: int = 0

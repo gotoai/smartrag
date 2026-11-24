@@ -29,6 +29,7 @@ from smartrag.index import SqliteIndex
 from smartrag.kb.config import MAX_DESCRIPTION
 from smartrag.kb.home import INDEX_FILE, Home
 from smartrag.search.attributes import filterable_keys, key_values
+from smartrag.tables.store import read_meta
 
 
 def agent_description(text: str) -> str:
@@ -59,6 +60,10 @@ class AgentCatalog:
 
     def describe(self, kb_id: str) -> KbDescription:
         kb = self.require(kb_id)
+        tables = [t.name for t in read_meta(self.home.kb_dir(kb_id)).tables]
+        if not (self.home.kb_dir(kb_id) / INDEX_FILE).is_file():
+            return KbDescription(kb_id=kb_id, description=kb.description, documents=0,
+                                 sources=[], filters=[], tables=tables)
         store = SqliteIndex.open(self.home.kb_dir(kb_id) / INDEX_FILE, readonly=True)
         try:
             rows = store.db.execute(
@@ -92,7 +97,8 @@ class AgentCatalog:
             filters=[FilterInfo(name="source", values=list(sources)),
                      FilterInfo(name="file_type", values=types),
                      FilterInfo(name="modified_after", format=dates),
-                     FilterInfo(name="modified_before", format=dates), *attribute_filters])
+                     FilterInfo(name="modified_before", format=dates), *attribute_filters],
+            tables=tables)
 
     def _usable(self, kb_id: str) -> AgentKb | None:
         try:
@@ -101,19 +107,23 @@ class AgentCatalog:
                 return None  # a remote kb: not until forwarding to remote nodes is built
             description = agent_description(config.description)
             path = self.home.kb_dir(kb_id) / INDEX_FILE
-            if not description or not path.is_file():
+            has_tables = bool(read_meta(self.home.kb_dir(kb_id)).tables)
+            if not description or not (path.is_file() or has_tables):
                 return None
-            store = SqliteIndex.open(path, readonly=True)
-            try:
-                held = store.meta("vector_space")
-                has_documents = store.db.execute(
-                    "SELECT EXISTS (SELECT 1 FROM documents WHERE status = 'ok')").fetchone()[0]
-            finally:
-                store.close()
+            held, has_documents = None, False
+            if path.is_file():
+                store = SqliteIndex.open(path, readonly=True)
+                try:
+                    held = store.meta("vector_space")
+                    has_documents = store.db.execute(
+                        "SELECT EXISTS (SELECT 1 FROM documents WHERE status = 'ok')"
+                    ).fetchone()[0]
+                finally:
+                    store.close()
         except Exception:  # noqa: BLE001 - a kb that cannot be read is not usable: hide it
             return None
-        if not has_documents or (held is not None
-                                 and held != resolve(config.embedding).space.key):
+        if not (has_documents or has_tables) or (
+                held is not None and held != resolve(config.embedding).space.key):
             return None
         return AgentKb(kb_id=kb_id, description=description)
 

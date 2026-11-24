@@ -29,6 +29,8 @@ from smartrag.agent.models import (
     AgentReadChunk,
     AgentReadResponse,
     AgentSearchResponse,
+    AgentTable,
+    AgentTableList,
     KbDescription,
     ReadScope,
 )
@@ -37,6 +39,7 @@ from smartrag.kb.config import AgentConfig
 from smartrag.kb.home import Home
 from smartrag.search import KbCitation, SearchFilter, read_chunk, search_kb
 from smartrag.search.models import AttributeCondition
+from smartrag.tables.models import QueryResult, TableDescription
 
 READ_WINDOW = 1
 """Chunks on each side for `scope=neighbors`: the library's default."""
@@ -126,6 +129,31 @@ class AgentService:
                               attributes=h.attributes)
                      for h in r.results],
             next_cursor=r.next_cursor)
+
+    # --- tables ----------------------------------------------------------------------
+
+    def list_tables(self, kb_id: str) -> AgentTableList:
+        self.catalog.require(kb_id)
+        from smartrag.tables.store import read_meta
+
+        return AgentTableList(kb_id=kb_id, tables=[
+            AgentTable(name=t.name, description=t.description, rows=t.rows,
+                       columns=len(t.columns), origin=t.original)
+            for t in read_meta(self.home.kb_dir(kb_id)).tables])
+
+    def describe_table(self, kb_id: str, table: str) -> TableDescription:
+        self.catalog.require(kb_id)
+        from smartrag.tables.query import describe_table
+
+        return describe_table(self.home, kb_id, table,
+                              show_paths=self.home.load(kb_id).agent.show_paths)
+
+    def query(self, kb_id: str, sql: str, *, max_rows: int = 100) -> QueryResult:
+        self.catalog.require(kb_id)
+        from smartrag.tables.query import query_tables
+
+        return query_tables(self.home, kb_id, sql, max_rows=max_rows,
+                            show_paths=self.home.load(kb_id).agent.show_paths)
 
     def read(self, kb_id: str, chunk_id: str, *, scope: ReadScope = "chunk",
              cursor: str | None = None) -> AgentReadResponse:

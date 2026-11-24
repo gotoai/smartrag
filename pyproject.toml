@@ -43,7 +43,11 @@ Repository = "https://github.com/gotoai/smartrag"
 Issues = "https://github.com/gotoai/smartrag/issues"
 
 [project.optional-dependencies]
+tables = [
+    "duckdb>=1.1",       # `table add` and SQL over tables (`kb query`, the MCP `query` tool)
+]
 dev = [
+    "duckdb>=1.1",       # the tables tests
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "httpx2>=2",         # FastAPI's TestClient (Starlette deprecated plain httpx for it)

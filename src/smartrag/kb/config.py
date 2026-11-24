@@ -205,6 +205,13 @@ class SourceConfig(_Strict):
         return value
 
 
+class TableEntryConfig(_Strict):
+    """A file or folder of tables that `sync` imports (`smartrag.tables`). Identified by its
+    location: agents see the tables, never the entry."""
+
+    uri: str
+
+
 class RemoteConfig(_Strict):
     """The single hop to a Smart RAG server. The server embeds queries with its own
     credentials; only the user's token for that server is held here."""
@@ -263,6 +270,7 @@ class KbConfig(_Strict):
     chunk: ChunkConfig | None = None
     sink: str | None = None
     sources: list[SourceConfig] = Field(default_factory=list)
+    tables: list[TableEntryConfig] = Field(default_factory=list)
     remote: RemoteConfig | None = None
     agent: AgentConfig = Field(default_factory=AgentConfig)
 
@@ -301,6 +309,9 @@ class KbConfig(_Strict):
                 if source.id in seen:
                     raise ValueError(f"source id {source.id!r} appears twice")
                 seen.add(source.id)
+            uris = [entry.uri for entry in self.tables]
+            if len(uris) != len(set(uris)):
+                raise ValueError("a table location appears twice under `tables`")
         else:
             if self.remote is None:
                 raise ValueError("a remote kb needs a `remote` section")
@@ -308,6 +319,8 @@ class KbConfig(_Strict):
                      if getattr(self, name) is not None]
             if self.sources:
                 extra.append("sources")
+            if self.tables:
+                extra.append("tables")
             if extra:
                 raise ValueError(
                     f"a remote kb's sources, sink and embedding are managed by its server; "
@@ -512,6 +525,28 @@ class ConfigDocument:
             keys = list(self.data)
             at = keys.index("title") + 1 if "title" in keys else len(keys)
             self.data.insert(at, "description", value)
+        self._revalidate()
+
+    def add_table(self, entry: TableEntryConfig) -> None:
+        tables = self.data.get("tables")
+        if not isinstance(tables, CommentedSeq):
+            tables = _block_seq([])
+            self.data["tables"] = tables
+            self.data.yaml_set_comment_before_after_key(
+                "tables", before="Files and folders of tables `kb sync` imports. Edit with "
+                                 "`smartrag run table add|remove`, or by hand.")
+        elif not tables:
+            tables.fa.set_block_style()
+        tables.append(CommentedMap([("uri", entry.uri)]))
+        self._revalidate()
+
+    def remove_table(self, uri: str) -> None:
+        tables = self.data.get("tables")
+        if isinstance(tables, CommentedSeq):
+            for index, item in enumerate(tables):
+                if isinstance(item, dict) and item.get("uri") == uri:
+                    del tables[index]
+                    break
         self._revalidate()
 
     def remove_source(self, source_id: str) -> None:

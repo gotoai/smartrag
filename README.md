@@ -14,7 +14,7 @@ and `smartrag mcp` serves them to agents. Still to come: the kb-aware Web API,
 ## Run
 
 ```sh
-uv venv --python 3.12 && uv pip install -e '.[dev]'
+uv venv --python 3.12 && uv pip install -e '.[dev]'   # '.[tables]' adds DuckDB for tables
 .venv/bin/smartrag serve --demo=true --auth=false         # http://127.0.0.1:8710/docs
 curl -s 'http://127.0.0.1:8710/v1/search?q=有給休暇の繰り越し' | python3 -m json.tool
 .venv/bin/pytest
@@ -105,10 +105,15 @@ smartrag version
 | [`kb reindex`](#kb-reindex) | Re-process old documents, or rebuild the whole index |
 | [`kb search`](#kb-search) | Search a kb |
 | [`kb read`](#kb-read) | Read a search result with its context |
+| [`kb query`](#kb-query) | Run read-only SQL over a kb's tables |
 | [`source list`](#source-list) | List a kb's sources |
 | [`source add`](#source-add) | Register a folder or file for `kb sync` to follow |
 | [`source remove`](#source-remove) | Unregister a source and remove its documents |
 | [`source test`](#source-test) | Show which files a sync of a source would read |
+| [`table list`](#table-list) | List a kb's table locations and their tables |
+| [`table add`](#table-add) | Register a file or folder of tables for `kb sync` to import |
+| [`table remove`](#table-remove) | Unregister a table location and drop its tables |
+| [`table describe`](#table-describe) | Show a table's columns, profile, links and sample rows |
 | [`provider list`](#provider-list) | List the embedding providers and models |
 
 ### kb commands
@@ -430,6 +435,22 @@ smartrag run kb read --kb edinet --chunk d_ae50b334255c36406537:7a7b5aa3299b3646
 smartrag run kb read --kb edinet --chunk d_ae50b334255c36406537:7a7b5aa3299b3646 --scope document --page 2
 ```
 
+#### `kb query`
+
+```
+smartrag run kb query --kb ID --sql "SELECT …" [--max-rows N]
+```
+
+Runs one read-only SQL statement (DuckDB's dialect) over the kb's [tables](#tables), as an
+agent's `query` tool does, and prints the rows, how many the query produced, and the tables
+it read. `--max-rows` (default 100, at most 1,000) limits the rows shown, not the query:
+aggregate in SQL rather than fetching many rows. A query is stopped after 30 s.
+
+```sh
+smartrag run kb query --kb edinet --sql "SELECT industry, count(*) FROM financials GROUP BY 1 ORDER BY 2 DESC"
+smartrag run --format json kb query --kb edinet --sql "SELECT * FROM companies WHERE sec_code = '7203'"
+```
+
 ### source commands
 
 A **source** is a folder (or one file) that `kb sync` follows. Smart RAG reads the files
@@ -511,6 +532,57 @@ the matching paths. Run it after `source add`, or after editing a source's patte
 
 ```sh
 smartrag run source test --kb edinet --source filings --sample 20
+```
+
+### table commands
+
+A table location is a file or a folder of tables; it is named by its path, with no id of
+its own, since agents see only the tables. Tables are imported by `kb sync`, not by
+`table add`. See [Tables](#tables).
+
+#### `table list`
+
+```
+smartrag run table list --kb ID
+```
+
+Each location, and the tables its last sync imported, with their rows, columns and file.
+
+#### `table add`
+
+```
+smartrag run table add --kb ID LOCATION [--allow-missing=true|false]
+```
+
+Registers `LOCATION`, a file or a folder (a path or a `file://` URI): a folder is taken
+whole, with its subfolders. The next `kb sync` imports it. `--allow-missing=true` accepts a
+location that does not exist now, such as a share that is not mounted.
+
+```sh
+smartrag run table add --kb edinet /data/EDINET_DATA/rag/tables
+```
+
+#### `table remove`
+
+```
+smartrag run table remove --kb ID LOCATION [--yes]
+```
+
+Unregisters the location, as it was added, and drops its tables at once. Its files are not
+touched. Asks first; `--yes` skips the question.
+
+#### `table describe`
+
+```
+smartrag run table describe --kb ID NAME
+```
+
+Shows a table as an agent's `describe_table` sees it: each column's type, unit and meaning,
+its nulls, distinct values, minimum and maximum, the columns that link to document
+attributes, a few rows, and the warnings of its import.
+
+```sh
+smartrag run table describe --kb edinet financials
 ```
 
 ### `provider list`
@@ -599,6 +671,46 @@ attributes data: 36,060 rows applied
            renamed doc_id to _attr_doc_id: Smart RAG uses the name
            3 lines skipped: not valid JSON (812, 9051, 20113)
 ```
+
+### Tables
+
+A kb can hold tables beside its documents, for questions about figures (totals, rankings,
+conditions over many companies) that search answers badly. Install the `tables` extra
+(`pip install 'smartrag[tables]'`) for DuckDB.
+
+- **What is read:** `.csv`, `.tsv`, Excel (`.xlsx`, `.xlsm`, `.xls`, `.xlsb`) and SQLite
+  (`.sqlite`, `.sqlite3`, `.db`). One table per CSV or TSV file, per visible sheet, per
+  SQLite table (views are skipped). The first non-empty row of a CSV, TSV or sheet is its
+  header.
+- **Names:** the file name made safe for SQL: lower case, anything but letters (Japanese
+  included), digits and `_` becomes `_`. A sheet or SQLite table adds its own name:
+  `book_売上`. Column names are made safe the same way. Two files giving the same name are
+  an error naming both; rename one of them.
+- **Types are read from every value of a column:** integer, number, boolean, date or
+  timestamp when all values read as one, else text. Thousands separators, full-width digits
+  and a leading `△` or `▲` (negative) are understood; `-`, `－`, `N/A` and an empty cell are
+  null. A column with a leading zero (`0123`) or mixing `7203` with `627A` stays text, so
+  codes keep their form. Text files may be UTF-8, UTF-16 with a BOM, or Shift_JIS (CP932).
+- **A schema** beside the file, `<file>.schema.json`, says what a table and its columns
+  are, in the same JSON Schema subset as attributes plus a table `description` and a column
+  `unit`; a declared `type` overrides what the values look like. For a workbook or a SQLite
+  database, the file maps each sheet or table name to its schema:
+  ```json
+  {"description": "主要な財務数値（会社×決算期）",
+   "properties": {"sec_code": {"type": "string", "description": "証券コード"},
+                  "net_sales": {"type": "number", "unit": "円", "description": "売上高"}}}
+  ```
+- **Tables meet documents through attributes.** A column named like a document attribute of
+  the same kb (`sec_code`, or `doc_id` for an attribute stored as `_attr_doc_id`) links its
+  rows to the documents with that value: `table describe` and an agent's `describe_table`
+  name these links, and an agent passes the values it selected to search's `attributes`
+  filter. **Name the linking columns like the attributes**, or the tables stand alone.
+- **Imports follow documents:** `kb sync` reads new and changed files (and those whose
+  schema changed) and drops tables whose files are gone; `kb reindex --rebuild` reads every
+  file again. A location that is missing, or a file that cannot be read, keeps its tables
+  from the last import. The sync summary has a `tables` line.
+- **Queries are read-only and confined:** no file or network access, no extensions, 2 GB
+  of memory and 4 threads, one statement, 30 s.
 
 ## Extraction
 
@@ -690,10 +802,13 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
 | `describe_sources(kb_id)` | Sources, file types, date range, last sync; each source's attributes and what they mean; the filters `search` accepts |
 | `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before, attributes)` | Hybrid search: passages with snippets and citations, never an answer. `attributes` filters on attributes: a value, a list, or `{from, to}` |
 | `read(kb_id, chunk_id, scope, cursor)` | A passage widened to `neighbors`, its `section` or the `document`, in pages |
+| `list_tables(kb_id)` | The kb's [tables](#tables): name, meaning, rows, columns, file |
+| `describe_table(kb_id, table)` | Columns with type, unit, meaning and profile; links to document attributes; sample rows |
+| `query(kb_id, sql, max_rows)` | One read-only SQL statement: columns, rows (100 by default, 1,000 at most), how many rows it produced, and the tables it read, to cite |
 
 - **Read-only.** Agents never sync, ingest or change a kb.
-- **Agents see only usable kbs:** local, indexed with at least one document, built with the
-  configured model's vector space, and with a description. The set is fixed at startup (it is
+- **Agents see only usable kbs:** local, with at least one indexed document or table, built
+  with the configured model's vector space, and with a description. The set is fixed at startup (it is
   in the server instructions and the `kb_id` enum) and re-checked on every call; any other
   kb id is refused as `not_found`. `--allow-kb` narrows it further.
 - **Citations carry the document's full path** (`file_path`), unless the kb's config sets
@@ -701,6 +816,8 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
   cut to file names.
 - **Agents see every attribute** of a document, as the publisher wrote it (see
   [Attributes](#attributes)).
+- **Table citations** name each table's file: its full path, or its file name only when the
+  kb hides paths.
 - **Embedding endpoint down:** keyword results, with `search_mode` `keyword`. A query waits
   at most 10 s with one retry; after a failure the vector side is skipped for 60 s.
 - Always starts, even with no home or no usable kb. stdout carries only the protocol; logs
@@ -719,9 +836,10 @@ src/smartrag/
   chunking.py      units to chunks; index/: SQLite store and bigram lexify
   embedding/       provider catalog, resolve, dialects (marking, wire), the HTTP embedder
                    kb/sync.py: the sync
-  search/          kb search (hybrid, RRF, paging) and kb read
+  search/          kb search (hybrid, RRF, paging), kb read and kb describe
+  tables/          table files read and imported into DuckDB at sync; read-only SQL
   agent/           the agent's view: usable kbs, results without paths, fast-failing embedders
   mcp/             MCP server over agent/ (`smartrag mcp`)
   api/             FastAPI app: query routes, ops routes, auth, error shape
-  cli/             `smartrag run` (kb, source, provider), `smartrag serve` and `smartrag mcp`
+  cli/             `smartrag run` (kb, source, table, provider), `smartrag serve`, `smartrag mcp`
 ```

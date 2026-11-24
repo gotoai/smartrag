@@ -1,5 +1,7 @@
 """`kb describe`: what a kb holds, as its owner sees it.
 
+Tables, when it has any, follow its sources: each with its file, rows and columns.
+
 The kb's basics (as `kb status` gives them), then per source: where it is, its documents
 by file type and date, and its attributes as the last sync applied them: the folder they
 came from, each key with its type, format, meaning and, for a string or boolean key with
@@ -21,6 +23,8 @@ from smartrag.kb.models import KbStatus
 from smartrag.kb.uris import uri_to_path
 from smartrag.search.attributes import FilterableKey, key_values
 from smartrag.search.models import Scalar
+from smartrag.tables.models import TableMeta
+from smartrag.tables.store import read_meta
 
 
 class AttributeKey(BaseModel):
@@ -55,6 +59,8 @@ class SourceDescription(BaseModel):
 class KbDescribed(BaseModel):
     status: KbStatus = Field(description="The kb's basics, as `kb status` gives them.")
     sources: list[SourceDescription] = Field(default_factory=list)
+    tables: list[TableMeta] = Field(default_factory=list, description="The tables the last "
+                                    "sync imported (`smartrag.tables`).")
 
 
 def describe_kb(home: Home, kb_id: str) -> KbDescribed:
@@ -63,6 +69,7 @@ def describe_kb(home: Home, kb_id: str) -> KbDescribed:
     if status.kind != "local":
         return described
     config = home.load(kb_id)
+    described.tables = read_meta(home.kb_dir(kb_id)).tables
     index = home.kb_dir(kb_id) / INDEX_FILE
     store = SqliteIndex.open(index, readonly=True) if index.is_file() else None
     try:

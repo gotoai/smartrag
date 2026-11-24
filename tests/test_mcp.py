@@ -12,14 +12,15 @@ from smartrag.kb import Home
 from smartrag.mcp import build_server
 from tests.test_search_read import CharEmbedder
 
-TOOLS = {"list_kbs", "describe_sources", "search", "read"}
+TOOLS = {"list_kbs", "describe_sources", "search", "read", "list_tables", "describe_table",
+         "query"}
 
 
 def _server(home):
     return build_server(home, embedders=QueryEmbedders(lambda _config: CharEmbedder()))
 
 
-async def test_four_read_only_tools_with_a_kb_id_enum(agent_home):
+async def test_read_only_tools_with_a_kb_id_enum(agent_home):
     async with Client(_server(agent_home)) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == TOOLS

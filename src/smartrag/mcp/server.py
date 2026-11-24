@@ -30,11 +30,13 @@ from smartrag.agent.models import (
     AgentKbList,
     AgentReadResponse,
     AgentSearchResponse,
+    AgentTableList,
     KbDescription,
 )
 from smartrag.errors import SmartRAGError
 from smartrag.kb.home import Home
 from smartrag.search.models import AttributeCondition
+from smartrag.tables.models import QueryResult, TableDescription
 
 log = logging.getLogger("smartrag.mcp")
 
@@ -65,6 +67,12 @@ def instructions(kbs: list[AgentKb]) -> str:
          "only keyword search: tell the user."),
         ("- An empty result means nothing in that knowledge base matched. It is not proof "
          "that something does not exist, and when search_mode is `keyword`, not even that."),
+        ("- Some knowledge bases also hold tables (describe_sources lists them). For "
+         "numbers (totals, rankings, conditions on figures) use list_tables, describe_table, "
+         "then query with SQL, and cite the tables a query read."),
+        ("- describe_table's links name the columns that match document attributes: to find "
+         "what the documents say about the rows you selected, pass those values to search's "
+         "attributes filter."),
     ]
     return "\n".join(lines)
 
@@ -138,6 +146,24 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
     ) -> Annotated[CallToolResult, AgentReadResponse]:
         return _result(lambda: service.read(kb_id, chunk_id, scope=scope, cursor=cursor), kb_id)
 
+    def list_tables(kb_id: KbId) -> Annotated[CallToolResult, AgentTableList]:
+        return _result(lambda: service.list_tables(kb_id), kb_id)
+
+    def describe_table(
+        kb_id: KbId,
+        table: Annotated[str, Field(description="A table name from list_tables.")],
+    ) -> Annotated[CallToolResult, TableDescription]:
+        return _result(lambda: service.describe_table(kb_id, table), kb_id)
+
+    def query(
+        kb_id: KbId,
+        sql: Annotated[str, Field(description="One read-only SQL statement (DuckDB dialect) "
+                                              "over the tables of list_tables.")],
+        max_rows: Annotated[int, Field(description="Rows to return, 1-1000; row_count says "
+                                                   "how many the query produced.")] = 100,
+    ) -> Annotated[CallToolResult, QueryResult]:
+        return _result(lambda: service.query(kb_id, sql, max_rows=max_rows), kb_id)
+
     server.add_tool(list_kbs, title="List knowledge bases", annotations=READ_ONLY,
                     description="List the knowledge bases you can search, each with what it "
                                 "holds. Choose one by its description.")
@@ -153,6 +179,20 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
     server.add_tool(read, title="Read a passage", annotations=READ_ONLY,
                     description="Read a passage from a search result, widened as far as you "
                                 "need. Long reads come in pages: pass next_cursor to continue.")
+    server.add_tool(list_tables, title="List tables", annotations=READ_ONLY,
+                    description="List a knowledge base's tables for SQL: each table's name, "
+                                "what it holds, its rows and columns, and the file it came "
+                                "from.")
+    server.add_tool(describe_table, title="Describe a table", annotations=READ_ONLY,
+                    description="Describe one table before querying it: each column's type, "
+                                "unit and meaning, its nulls, distinct values, minimum and "
+                                "maximum, a few sample rows, warnings from its import, and "
+                                "the columns that link to document attributes.")
+    server.add_tool(query, title="Query tables", annotations=READ_ONLY,
+                    description="Run one read-only SQL statement over a knowledge base's "
+                                "tables. Answers with the columns, the rows (up to max_rows), "
+                                "how many rows the query produced, and the tables it read, to "
+                                "cite. Aggregate in SQL rather than fetching many rows.")
     return server
 
 

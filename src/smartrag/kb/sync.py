@@ -489,12 +489,29 @@ def sync_kb(home: Home, kb_id: str, *, source: str | None = None, dry_run: bool 
         finally:
             if store is not None:
                 store.close()
+        if source is None:
+            sync_kb_tables(config, kb_dir, report, dry_run=True, only_stale=only_stale)
         return _finish(report, started, None)
     with kb_lock(kb_dir, "kb reindex --refresh-stale-only" if only_stale else "kb sync"):
         sync_into(home, config, index_path, report, targets, source, force=force,
                   only_stale=only_stale, embedder=embedder, progress=progress)
         refresh_after_write(index_path, kb_dir / "cache", report.vector_space)
+        if source is None and not report.interrupted:
+            sync_kb_tables(config, kb_dir, report, only_stale=only_stale)
         return _finish(report, started, kb_dir / "runs")
+
+
+def sync_kb_tables(config: KbConfig, kb_dir: Path, report: SyncReport, *,
+                   dry_run: bool = False, force: bool = False, only_stale: bool = False) -> None:
+    """Import the kb's tables after its documents: they need no embedding, so a sync
+    stopped by the embedding endpoint still brings its tables up to date."""
+    from smartrag.tables.store import sync_tables
+
+    try:
+        report.tables = sync_tables(config, kb_dir, dry_run=dry_run, force=force,
+                                    only_stale=only_stale)
+    except SmartRAGError as exc:
+        report.error = (f"{report.error}; " if report.error else "") + f"tables: {exc.message}"
 
 
 def _prepare(home: Home, kb_id: str, source: str | None, dry_run: bool, operation: str,

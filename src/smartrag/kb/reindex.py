@@ -34,7 +34,7 @@ from smartrag.index import SqliteIndex
 from smartrag.kb.home import INDEX_FILE, REBUILD_FILE, Home
 from smartrag.kb.lock import kb_lock
 from smartrag.kb.models import SyncReport
-from smartrag.kb.sync import _execute, _finish, _prepare, _Run, sync_into, sync_kb
+from smartrag.kb.sync import _execute, _finish, _prepare, _Run, sync_into, sync_kb, sync_kb_tables
 from smartrag.search.vectors import refresh_after_write
 
 _SIDE_FILES = ("-wal", "-shm")
@@ -68,6 +68,7 @@ def reindex_rebuild(home: Home, kb_id: str, *, dry_run: bool = False,
     if dry_run:
         # As if the index were empty: every file counts as added.
         _execute(_Run(home, config, None, None, report, True, progress), targets, None)
+        sync_kb_tables(config, kb_dir, report, dry_run=True, force=True)
         return _finish(report, started, None)
 
     with kb_lock(kb_dir, "kb reindex --rebuild"):
@@ -99,6 +100,7 @@ def reindex_rebuild(home: Home, kb_id: str, *, dry_run: bool = False,
             return _finish(report, started, kb_dir / "runs")
         _swap(live, fresh)
         refresh_after_write(live, kb_dir / "cache", report.vector_space)
+        sync_kb_tables(config, kb_dir, report, force=True)
         return _finish(report, started, kb_dir / "runs")
 
 
