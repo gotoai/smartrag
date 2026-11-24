@@ -3,7 +3,7 @@
     list_kbs()                     usable kbs: id and description only
     describe_sources(kb_id)        sources, file types, dates, freshness, filters
     search(kb_id, query, ...)      hybrid, chunks, at most 3 per document; filters on
-                                   allow-listed attributes
+                                   attributes; partitioned by a key, compact by default
     read(kb_id, chunk_id, ...)     a passage widened to its neighbours, section or document
 
 Read-only. Results are the library's `kb search` and `kb read`, projected to what an
@@ -24,8 +24,10 @@ from smartrag.agent.catalog import AgentCatalog
 from smartrag.agent.embedders import QueryEmbedders
 from smartrag.agent.models import (
     AgentCitation,
+    AgentCompactHit,
     AgentHit,
     AgentKbList,
+    AgentPartitions,
     AgentReadChunk,
     AgentReadResponse,
     AgentSearchResponse,
@@ -38,7 +40,7 @@ from smartrag.errors import InvalidRequest
 from smartrag.kb.config import AgentConfig
 from smartrag.kb.home import Home
 from smartrag.search import KbCitation, SearchFilter, read_chunk, search_kb
-from smartrag.search.models import AttributeCondition
+from smartrag.search.models import AttributeCondition, CompactHit, SearchHit
 from smartrag.tables.models import QueryResult, TableDescription
 
 READ_WINDOW = 1
@@ -103,7 +105,8 @@ class AgentService:
                modified_after: str | None = None,
                modified_before: str | None = None,
                attributes: Mapping[str, AttributeCondition | Any] | None = None,
-               ) -> AgentSearchResponse:
+               partition_by: str | None = None, top: int = 1,
+               compact: bool | None = None) -> AgentSearchResponse:
         self.catalog.require(kb_id)
         config = self.home.load(kb_id)
         assert config.embedding is not None  # a usable kb is local
@@ -117,18 +120,31 @@ class AgentService:
                                modified_before=_moment(modified_before, "modified_before"),
                                attributes=conditions)
         r = search_kb(self.home, kb_id, query, limit=k, cursor=cursor, filters=filters,
+                      partition_by=partition_by, top=top, compact=compact,
                       embedder=self.embedders.get(kb_id, config.embedding))
+        results: list[AgentHit] | list[AgentCompactHit]
+        if r.compact:
+            results = [AgentCompactHit(rank=h.rank, partition=h.partition, score=h.score,
+                                       ranks=h.ranks,
+                                       chunk_id=h.chunk_id, doc_id=h.doc_id,
+                                       title=safe_title(h.title), page=h.page,
+                                       heading=h.heading, snippet=h.snippet, link=h.link)
+                       for h in r.results if isinstance(h, CompactHit)]
+        else:
+            results = [AgentHit(rank=h.rank, chunk_id=h.chunk_id, doc_id=h.doc_id,
+                                partition=h.partition, title=safe_title(h.title),
+                                snippet=h.snippet,
+                                citation=_citation(h.citation, config.agent),
+                                indexed_at=h.indexed_at,
+                                file_type=h.metadata.get("file_type", ""),
+                                attributes=h.attributes)
+                       for h in r.results if isinstance(h, SearchHit)]
         return AgentSearchResponse(
             kb_id=kb_id, query_id=r.query_id, query=r.query,
             search_mode="keyword" if r.search_mode == "keyword" else "hybrid",
-            results=[AgentHit(rank=h.rank, chunk_id=h.chunk_id, doc_id=h.doc_id,
-                              title=safe_title(h.title), snippet=h.snippet,
-                              citation=_citation(h.citation, config.agent),
-                              indexed_at=h.indexed_at,
-                              file_type=h.metadata.get("file_type", ""),
-                              attributes=h.attributes)
-                     for h in r.results],
-            next_cursor=r.next_cursor)
+            partitions=None if r.partitions is None
+            else AgentPartitions(**r.partitions.model_dump()),
+            results=results, next_cursor=r.next_cursor)
 
     # --- tables ----------------------------------------------------------------------
 

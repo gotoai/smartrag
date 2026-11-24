@@ -18,6 +18,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from smartrag.errors import InvalidRequest
 from smartrag.index import SqliteIndex
@@ -26,9 +27,10 @@ from smartrag.kb.home import Home
 from smartrag.search.common import open_kb
 from smartrag.search.models import AttributeCondition, AttributeRange, Scalar
 
-MAX_VALUES = 100
-"""Values in one key's list: room for "compare these companies" many times over, while a
-filter stays a filter rather than a document list."""
+MAX_VALUES = 1000
+"""Values in one key's list: a set of entities chosen by SQL over a kb's tables (a
+screen of listed companies passes about 600), while a filter stays a filter rather than
+a document list. A list reaches SQLite as one JSON array, not one parameter per value."""
 
 MAX_LISTED_VALUES = 50
 """`describe_sources` lists a key's values when it has at most this many: the 33 TSE
@@ -122,6 +124,72 @@ def matching_documents(store: SqliteIndex,
     return docs
 
 
+SOURCE_KEY = "source"
+"""Partitioning by `source` splits by the documents' source; no attribute has this name
+(it is escaped to `_attr_source`)."""
+
+
+@dataclass
+class Partitioning:
+    """Each document's value of a partition key, among the documents a search's filters
+    leave."""
+
+    key: str
+    of: dict[str, Any]
+    """doc_id → value, as SQL holds it; documents without a value are not here."""
+    without_key: int
+    empty: list[Any]
+    """Listed values of the key's filter that no document has, as SQL holds them."""
+    boolean: bool = False
+
+    def display(self, value: Any) -> Any:
+        return bool(value) if self.boolean and value is not None else value
+
+
+def partitioning(store: SqliteIndex, name: str, docs: list[str],
+                 conditions: Mapping[str, AttributeCondition]) -> Partitioning:
+    """`docs` (the ids the filters leave) split by `name`: an attribute key or `source`."""
+    left = set(docs)
+    of: dict[str, Any] = {}
+    boolean = False
+    if name == SOURCE_KEY:
+        of = {doc_id: source_id for doc_id, source_id in store.db.execute(
+            "SELECT doc_id, source_id FROM documents WHERE status = 'ok'") if doc_id in left}
+    else:
+        keys = filterable_keys(store)
+        key = keys.get(name)
+        if key is None or key.conflict:
+            usable = {n: k for n, k in keys.items() if not k.conflict}
+            known = ", ".join([SOURCE_KEY, *sorted(usable)])
+            reason = ("its sources give it different types" if key is not None
+                      else "no source has this attribute")
+            raise InvalidRequest(f"cannot partition by {name!r}: {reason}; partition by one "
+                                 f"of: {known}", {"partition_by": name, "keys": known})
+        boolean = key.type == "boolean"
+        for source_id in key.sources:
+            values = {row[0]: row[1] for row in store.db.execute(
+                f"SELECT path, {_value(key)} AS v FROM attribute_rows "
+                f"WHERE source_id = ? AND v IS NOT NULL", (source_id,))}
+            for doc_id, rel_path in store.db.execute(
+                    "SELECT doc_id, rel_path FROM documents WHERE source_id = ? "
+                    "AND status = 'ok'", (source_id,)):
+                if doc_id in left:
+                    value = values.get(normalize_path(rel_path))
+                    if value is not None:
+                        of[doc_id] = value
+    empty: list[Any] = []
+    listed = conditions.get(name)
+    if name != SOURCE_KEY and listed is not None and not isinstance(listed, AttributeRange):
+        key = filterable_keys(store)[name]
+        present = set(of.values())
+        for item in listed if isinstance(listed, list) else [listed]:
+            value = _scalar(key, item)
+            if value not in present and value not in empty:
+                empty.append(value)
+    return Partitioning(key=name, of=of, without_key=len(left) - len(of), empty=empty,
+                        boolean=boolean)
+
+
 def documents_clause(doc_ids: list[str]) -> tuple[str, list[object]]:
     """A WHERE clause over `documents d` for a set of ids of any size: one JSON array,
     not one parameter per id, which SQLite caps."""
@@ -169,7 +237,8 @@ def _clause(key: FilterableKey, condition: AttributeCondition) -> tuple[str, lis
             raise InvalidRequest(f"the list for attribute {key.name!r} has {len(condition)} "
                                  f"values; the limit is {MAX_VALUES}", {"attribute": key.name})
         values = [_scalar(key, item) for item in condition]
-        return f"{value} IN ({','.join('?' * len(values))})", list(values)
+        return f"{value} IN (SELECT value FROM json_each(?))", [
+            json.dumps(values, ensure_ascii=False)]
     return f"{value} = ?", [_scalar(key, condition)]
 
 

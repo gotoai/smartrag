@@ -17,6 +17,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from smartrag.search.models import SideRanks
+
 ReadScope = Literal["chunk", "neighbors", "section", "document"]
 AgentSearchMode = Literal["hybrid", "keyword"]
 
@@ -110,6 +112,8 @@ class AgentHit(BaseModel):
     rank: int
     chunk_id: str = Field(description="Pass to `read` to widen this passage.")
     doc_id: str
+    partition: Attribute = Field(default=None,
+                                 description="The hit's value of partition_by, when given.")
     title: str
     snippet: str
     citation: AgentCitation
@@ -121,6 +125,42 @@ class AgentHit(BaseModel):
                                           "means.")
 
 
+class AgentCompactHit(BaseModel):
+    """A hit cut to what ranking and citing need; `read` gives the full passage and
+    citation, and the document's attributes."""
+
+    rank: int
+    partition: Attribute = Field(default=None,
+                                 description="The hit's value of partition_by, when given.")
+    score: float = Field(description="Relevance over the whole search: higher is better, "
+                                     "comparable across partitions.")
+    ranks: SideRanks = Field(description="The passage's rank on the keyword and the vector "
+                                         "side; no keyword rank: the query's words did not "
+                                         "match there.")
+    chunk_id: str = Field(description="Pass to `read` to widen this passage.")
+    doc_id: str
+    title: str
+    page: int | None = None
+    heading: str | None = Field(default=None, description="The section the passage sits under.")
+    snippet: str
+    link: str | None = Field(default=None, description="The document's original web page, "
+                                                     "from its publisher. Not always given.")
+
+
+class AgentPartitions(BaseModel):
+    key: str
+    top: int = Field(description="Hits each partition contributes at most.")
+    count: int = Field(description="Partitions: distinct values of the key among the "
+                                   "documents the filters leave. next_cursor pages through "
+                                   "all of them.")
+    documents_without_key: int = Field(
+        description="Documents the filters leave that have no value for the key: left out.")
+    empty: list[Attribute] = Field(
+        default_factory=list,
+        description="Values your attributes filter lists for the key that no document "
+                    "matching the other filters has: nothing to find for them.")
+
+
 class AgentSearchResponse(BaseModel):
     kb_id: str
     query_id: str
@@ -128,7 +168,8 @@ class AgentSearchResponse(BaseModel):
     search_mode: AgentSearchMode = Field(
         description="`hybrid`: keyword and vector search. `keyword`: vector search could not "
                     "be used (the embedding service was unavailable), keyword search only.")
-    results: list[AgentHit]
+    partitions: AgentPartitions | None = None
+    results: list[AgentHit] | list[AgentCompactHit]
     next_cursor: str | None = None
 
 

@@ -1,6 +1,6 @@
 """`smartrag mcp`: the agent-facing MCP server over stdio.
 
-A thin adapter over `smartrag.agent.AgentService`: four read-only tools, the usable kbs
+A thin adapter over `smartrag.agent.AgentService`: read-only tools, the usable kbs
 listed in the server instructions, `kb_id` an enum of them in every schema. Each result
 carries the model as structured content and as compact JSON text (Japanese unescaped);
 each failure is a tool result with `isError` and `{"error": {code, message, hint}}`, so
@@ -73,6 +73,10 @@ def instructions(kbs: list[AgentKb]) -> str:
         ("- describe_table's links name the columns that match document attributes: to find "
          "what the documents say about the rows you selected, pass those values to search's "
          "attributes filter."),
+        ("- To cover many entities at once (every company a query selected), search with "
+         "partition_by set to the linking attribute and the values in the attributes filter: "
+         "each entity's best passages come back, pages of up to 100, ranked by one score. "
+         "partitions.empty lists the values with no documents."),
     ]
     return "\n".join(lines)
 
@@ -112,7 +116,8 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
         kb_id: KbId,
         query: Annotated[str, Field(description="Natural language, up to 2,000 characters. "
                                                 "A part in double quotes is an exact phrase.")],
-        k: Annotated[int, Field(description="Results per page, 1-50.")] = 10,
+        k: Annotated[int, Field(description="Results per page: 1-50, or 1-100 for compact "
+                                            "results.")] = 10,
         cursor: Annotated[str | None, Field(
             description="next_cursor from the previous page of the same search.")] = None,
         source: Annotated[list[str] | None, Field(
@@ -128,11 +133,23 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
                         "(any of them), or {\"from\": ..., \"to\": ...} for a number or "
                         "date (both ends included). Keys and shapes: the attributes.* "
                         "filters of describe_sources.")] = None,
+        partition_by: Annotated[str | None, Field(
+            description="Split the documents by this attribute (or `source`) and return each "
+                        "value's best passages, e.g. edinet_code for one company at a time: "
+                        "the way to cover many entities at once. Hits stay ordered by one "
+                        "relevance score across all partitions.")] = None,
+        top: Annotated[int, Field(description="With partition_by: passages per partition, "
+                                              "1-10.")] = 1,
+        compact: Annotated[bool | None, Field(
+            description="Short hits without attributes or file paths: on by default with "
+                        "partition_by, off without. read gives the full passage and "
+                        "citation.")] = None,
     ) -> Annotated[CallToolResult, AgentSearchResponse]:
         return _result(lambda: service.search(
             kb_id, query, k=k, cursor=cursor, source=source or (), file_type=file_type or (),
             modified_after=modified_after, modified_before=modified_before,
-            attributes=attributes), kb_id)
+            attributes=attributes, partition_by=partition_by, top=top, compact=compact),
+            kb_id)
 
     def read(
         kb_id: KbId,
@@ -173,9 +190,10 @@ def build_server(home: Home, allow: Collection[str] | None = None, *,
                                 "the filter values search accepts.")
     server.add_tool(search, title="Search a knowledge base", annotations=READ_ONLY,
                     description="Search one knowledge base for evidence: ranked passages with "
-                                "snippets and citations, never an answer. If search_mode is "
-                                "`keyword`, say the search was keyword-only. read widens a "
-                                "passage; next_cursor gives more results.")
+                                "snippets and citations, never an answer. partition_by gives "
+                                "each entity's (e.g. each company's) best passages. If "
+                                "search_mode is `keyword`, say the search was keyword-only. "
+                                "read widens a passage; next_cursor gives more results.")
     server.add_tool(read, title="Read a passage", annotations=READ_ONLY,
                     description="Read a passage from a search result, widened as far as you "
                                 "need. Long reads come in pages: pass next_cursor to continue.")

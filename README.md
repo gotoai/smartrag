@@ -361,6 +361,7 @@ smartrag run kb search --kb ID QUERY [-k|--limit N] [--page N | --cursor TOKEN]
                        [--max-per-doc N] [--source SID]… [--type EXT]… [--path PREFIX]
                        [--modified-after DATE] [--modified-before DATE] [--attr FILTER]…
                        [--include highlights|text]… [--snippet-chars N]
+                       [--partition-by KEY [--top T]] [--compact=true|false]
 ```
 
 Returns ranked passages (chunks) with snippets and citations. It returns evidence, never an
@@ -369,7 +370,7 @@ answer.
 | Option | Default | Meaning |
 |---|---|---|
 | `QUERY` | required | Natural language. A part in double quotes must appear as an exact phrase on the keyword side; quote the whole query for the shell: `'"年次有給休暇" 繰り越し'` |
-| `-k`, `--limit N` | `10` | Results per page, 1–50 |
+| `-k`, `--limit N` | `10` | Results per page, 1–50; 1–100 for compact results |
 | `--page N` | `1` | Page number. Use either `--page` or `--cursor`, not both |
 | `--cursor TOKEN` | – | The `next_cursor` of a previous `--format json` result: the next page of exactly that search. For programs |
 | `--search-mode` | `hybrid` | `hybrid`: keyword and vector results merged; `keyword`: words only; `vector`: meaning only |
@@ -382,7 +383,10 @@ answer.
 | `--modified-before DATE` | – | Files last modified before `DATE` (not including it) |
 | `--attr FILTER…` | – | Attributes, see below |
 | `--include highlights\|text…` | none | Extra fields: `highlights` (the start and end of each match in the snippet, for programs), `text` (the whole chunk). Repeat for both |
-| `--snippet-chars N` | `300` | Snippet length in characters, 50–2000 |
+| `--snippet-chars N` | `300`, compact `120` | Snippet length in characters, 50–2000 |
+| `--partition-by KEY` | – | Split the documents by an attribute, or by `source`, and take each value's best passages: see [Partitioned search](#partitioned-search) |
+| `--top T` | `1` | With `--partition-by`: passages per value, 1–10 |
+| `--compact=true\|false` | `true` with `--partition-by`, else `false` | Short results: no attributes and no file path, the last heading only, a 120-character snippet. `kb read` gives the rest |
 
 Different filters combine with AND: `--source kitei --type pdf` means PDFs of `kitei`.
 
@@ -392,17 +396,40 @@ attribute can be used; one the source's `schema.json` does not declare is a stri
 | `FILTER` | Matches documents whose attribute |
 |---|---|
 | `KEY=VALUE` | equals `VALUE`, read as the key's type (`2026-03-31`, `7203`, `true`) |
-| `KEY=A --attr KEY=B` | equals `A` or `B`: repeating a key means OR (at most 100 values) |
+| `KEY=A --attr KEY=B` | equals `A` or `B`: repeating a key means OR (at most 1,000 values) |
 | `KEY=FROM..TO` | is from `FROM` to `TO`, both included. Integer, number and date keys only; for a string key, `..` is part of the value |
 | `KEY=FROM..` / `KEY=..TO` | is at least `FROM` / at most `TO` |
 
 Different keys combine with AND. A range cannot be combined with other values of the same key.
 
-Text output, per result: its rank, title, page or sheet location and outline path (OPath),
-and which side found it (`keyword 1 · vector 3` are its ranks there); the snippet; the
-source and file path and the `chunk` id (for `kb read`); the link and attributes, if
-any. When the embedding endpoint cannot be reached, a `note:` line says that the
-results are keyword-only.
+##### Partitioned search
+
+A search ranks everything the filters leave and returns the best passages overall, so a
+few documents with strong passages can fill every page. `--partition-by KEY` splits the
+documents by a key and lets each value contribute its best `--top` passages: with
+`--partition-by sec_code`, one passage per company, for every company the filters leave.
+
+- The key is any attribute the kb has, or `source`. Documents without a value for it are
+  left out, and the output counts them.
+- With a list for the key in `--attr` (the companies a SQL query over the kb's
+  [tables](#tables) selected, say), the partitions are those values; the output names the
+  values that have no documents.
+- Results keep one score across all partitions, so a company whose best passage ranks 40th
+  overall comes after one whose best ranks 3rd. Pages run through every partition, in that
+  order, to a depth of 10,000 results.
+- `-k`, `--group-by` and `--max-per-doc` apply as usual: `--group-by document --top 2`
+  gives each company's two best documents.
+- Results are compact unless `--compact=false`.
+
+Both sides rank every passage the filters leave rather than a pool of the best, so a
+partitioned search over a large kb takes longer than an ordinary one.
+
+Text output, per result: its rank, its partition value in brackets when partitioned,
+title, page or sheet location and outline path (OPath), and which side found it
+(`keyword 1 · vector 3` are its ranks there); the snippet; the source and file path and
+the `chunk` id (for `kb read`); the link and attributes, if any. A compact result has its
+page and last heading, the snippet, and the `chunk` id with the link. When the embedding
+endpoint cannot be reached, a `note:` line says that the results are keyword-only.
 
 ```sh
 smartrag run kb search --kb legal "有給休暇の繰り越し"
@@ -411,6 +438,7 @@ smartrag run kb search --kb legal "出張旅費" --source kitei --path 人事/ -
 smartrag run kb search --kb edinet "為替変動リスク" --attr sec_code=7203 --attr fiscal_year_end=2026-03-31
 smartrag run kb search --kb edinet "研究開発費" --attr sec_code=6758 --attr sec_code=7751 --attr fiscal_year_end=2025-01-01..2026-12-31
 smartrag run kb search --kb legal "経費精算" --group-by document --page 2
+smartrag run kb search --kb edinet "生成AIの活用とDXの取り組み" --partition-by sec_code --attr sec_code=6273 --attr sec_code=3231 -k 100
 ```
 
 #### `kb read`
@@ -800,7 +828,7 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
 |---|---|
 | `list_kbs()` | The usable kbs: `kb_id` and description only |
 | `describe_sources(kb_id)` | Sources, file types, date range, last sync; each source's attributes and what they mean; the filters `search` accepts |
-| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before, attributes)` | Hybrid search: passages with snippets and citations, never an answer. `attributes` filters on attributes: a value, a list, or `{from, to}` |
+| `search(kb_id, query, k, cursor, source, file_type, modified_after, modified_before, attributes, partition_by, top, compact)` | Hybrid search: passages with snippets and citations, never an answer. `attributes` filters on attributes: a value, a list, or `{from, to}`. `partition_by` gives each value's best `top` passages ([Partitioned search](#partitioned-search)); results are then compact unless `compact` is false |
 | `read(kb_id, chunk_id, scope, cursor)` | A passage widened to `neighbors`, its `section` or the `document`, in pages |
 | `list_tables(kb_id)` | The kb's [tables](#tables): name, meaning, rows, columns, file |
 | `describe_table(kb_id, table)` | Columns with type, unit, meaning and profile; links to document attributes; sample rows |
@@ -813,7 +841,8 @@ smartrag mcp [--home DIR] [--allow-kb ID]...     # MCP over stdio; spawned by th
   kb id is refused as `not_found`. `--allow-kb` narrows it further.
 - **Citations carry the document's full path** (`file_path`), unless the kb's config sets
   `agent.show_paths: false`, and its `link`; error messages never carry paths. Titles are
-  cut to file names.
+  cut to file names. Compact results carry neither attributes nor `file_path`; `read`
+  gives both.
 - **Agents see every attribute** of a document, as the publisher wrote it (see
   [Attributes](#attributes)).
 - **Table citations** name each table's file: its full path, or its file name only when the

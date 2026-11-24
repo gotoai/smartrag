@@ -61,6 +61,7 @@ from smartrag.search import (
     search_kb,
 )
 from smartrag.search.attributes import attr_options
+from smartrag.search.models import CompactHit
 
 run_app = typer.Typer(help="Run one command and exit (non-interactive).",
                       no_args_is_help=True, add_completion=False)
@@ -418,7 +419,8 @@ def kb_search(
     query: str = typer.Argument(..., help="Natural language; a part in double quotes is an "
                                           "exact phrase on the keyword side."),
     kb: str = typer.Option(..., "--kb", help="The kb's id."),
-    limit: int = typer.Option(10, "-k", "--limit", min=1, max=50, help="Results per page."),
+    limit: int = typer.Option(10, "-k", "--limit", min=1, max=100,
+                              help="Results per page: up to 50, or 100 compact."),
     page: int = typer.Option(None, "--page", min=1, help="Page number (for people)."),
     cursor: str = typer.Option(None, "--cursor",
                                help="The next_cursor of a previous JSON result (for programs)."),
@@ -444,8 +446,16 @@ def kb_search(
     include: list[IncludeOption] = typer.Option(None, "--include",
                                                 help="Extra fields: highlights, text. "
                                                      "Repeatable."),
-    snippet_chars: int = typer.Option(300, "--snippet-chars", min=50, max=2000,
-                                      help="Snippet length."),
+    snippet_chars: int = typer.Option(None, "--snippet-chars", min=50, max=2000,
+                                      help="Snippet length: 300, or 120 compact."),
+    partition_by: str = typer.Option(None, "--partition-by",
+                                     help="Split the documents by this attribute, or "
+                                          "`source`, and take each value's best hits."),
+    top: int = typer.Option(1, "--top", min=1, max=10,
+                            help="With --partition-by: hits per partition."),
+    compact: TrueFalse = typer.Option(None, "--compact", case_sensitive=False,
+                                      help="Short hits: no attributes, no path, last heading. "
+                                           "Default: true with --partition-by, else false."),
 ) -> None:
     """Search the kb for evidence: ranked chunks with snippets and citations. An empty
     result list is a success (exit 0)."""
@@ -462,7 +472,9 @@ def kb_search(
             state.home, kb, query, limit=limit, page=page, cursor=cursor,
             search_mode=search_mode.value, group_by=group_by.value, max_per_doc=max_per_doc,
             filters=filters,
-            include=[i.value for i in include or []], snippet_chars=snippet_chars)
+            include=[i.value for i in include or []], snippet_chars=snippet_chars,
+            partition_by=partition_by, top=top,
+            compact=None if compact is None else bool(compact))
 
     invoke(state, run, _render_search)
 
@@ -993,14 +1005,29 @@ def _render_search(r: KbSearchResponse) -> str:
     if not r.results:
         lines.append(f"No results for {r.query!r} ({r.search_mode}, {r.took_ms} ms).")
         return "\n".join(lines)
+    if r.partitions:
+        p = r.partitions
+        lines.append(f"partitions by {p.key}: {p.count}, top {p.top} each"
+                     + (f" · {p.documents_without_key} documents without {p.key}"
+                        if p.documents_without_key else ""))
+        if p.empty:
+            lines.append(f"no documents for: {', '.join(str(v) for v in p.empty)}")
     for hit in r.results:
-        c = hit.citation
-        where = "  ".join(part for part in (
-            _pages(c.page, c.page_end), c.location or "", " > ".join(c.heading_path)) if part)
         sides = " · ".join(f"{side} {rank}" for side, rank in
                            (("keyword", hit.ranks.keyword), ("vector", hit.ranks.vector))
                            if rank is not None)
-        lines.append(f"{hit.rank}. {hit.title}  {where}".rstrip() + f"    [{sides}]")
+        lead = f"{hit.rank}. " + (f"[{hit.partition}] " if hit.partition is not None else "")
+        if isinstance(hit, CompactHit):
+            where = "  ".join(part for part in (_pages(hit.page, None), hit.heading or "")
+                              if part)
+            lines.append(f"{lead}{hit.title}  {where}".rstrip() + f"    [{sides}]")
+            lines.append(f"   {hit.snippet}")
+            lines.append(f"   chunk {hit.chunk_id}" + (f" · {hit.link}" if hit.link else ""))
+            continue
+        c = hit.citation
+        where = "  ".join(part for part in (
+            _pages(c.page, c.page_end), c.location or "", " > ".join(c.heading_path)) if part)
+        lines.append(f"{lead}{hit.title}  {where}".rstrip() + f"    [{sides}]")
         lines.append(f"   {hit.snippet}")
         where_from = f"sink, from {c.origin_path}" if c.origin_path else f"{c.source_id}/{c.path}"
         lines.append(f"   {where_from} · chunk {hit.chunk_id}")

@@ -81,6 +81,8 @@ class SearchHit(BaseModel):
     rank: int
     chunk_id: str
     doc_id: str
+    partition: Attribute = Field(default=None,
+                                 description="The hit's value of `partition_by`, when set.")
     score: float = Field(description="Fused rank score; orders this list only.")
     ranks: SideRanks
     title: str
@@ -93,6 +95,41 @@ class SearchHit(BaseModel):
     attributes: dict[str, Attribute] = Field(
         default_factory=dict, description="The document's attributes, other than `title` "
                                           "and `link`.")
+
+
+class CompactHit(BaseModel):
+    """A hit cut to what ranking and citing need: no attributes (they are the same for
+    every hit of a document, and an entity's facts are in its tables), no file path (`read`
+    returns the full citation), the last heading only, a short snippet."""
+
+    rank: int
+    partition: Attribute = Field(default=None,
+                                 description="The hit's value of `partition_by`, when set.")
+    score: float = Field(description="Fused rank score; orders this list only.")
+    ranks: SideRanks
+    chunk_id: str
+    doc_id: str
+    title: str
+    page: int | None = None
+    heading: str | None = Field(default=None, description="The section the passage sits under.")
+    snippet: str
+    link: str | None = Field(default=None, description="The document's original URL, from its "
+                                                     "source's attributes.")
+
+
+class Partitions(BaseModel):
+    """How a partitioned search split the documents the filters left."""
+
+    key: str
+    top: int = Field(description="Hits each partition contributes at most.")
+    count: int = Field(description="Partitions: distinct values of the key among the "
+                                   "documents the filters leave.")
+    documents_without_key: int = Field(
+        description="Documents the filters leave that have no value for the key: left out.")
+    empty: list[Attribute] = Field(
+        default_factory=list,
+        description="Values the filter on the key lists that no document left by the "
+                    "filters has.")
 
 
 class IndexDescription(BaseModel):
@@ -109,7 +146,9 @@ class KbSearchResponse(BaseModel):
     fallback_reason: str | None = Field(
         default=None, description="Why a hybrid search fell back to keyword; only then set.")
     group_by: GroupBy
-    results: list[SearchHit]
+    partitions: Partitions | None = None
+    compact: bool = False
+    results: list[SearchHit | CompactHit]
     page: int
     next_cursor: str | None = None
     index: IndexDescription
