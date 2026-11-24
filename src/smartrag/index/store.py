@@ -165,7 +165,6 @@ class IndexStats(BaseModel):
     skipped: int
     failed: int
     chunks: int
-    embedded: int
     vector_space: str | None
     dimensions: int | None
     last_indexed_at: str | None
@@ -455,13 +454,14 @@ class SqliteIndex:
     def stats(self) -> IndexStats:
         counts = {row["status"]: row["n"] for row in self.db.execute(
             "SELECT status, COUNT(*) AS n FROM documents GROUP BY status")}
-        chunks = self.db.execute("SELECT COUNT(*), COUNT(embedding) FROM chunks").fetchone()
+        # Not COUNT(embedding): that reads every vector blob, gigabytes for a large index.
+        chunks = self.db.execute("SELECT COUNT(*) FROM chunks").fetchone()
         last = self.db.execute("SELECT MAX(indexed_at) FROM documents").fetchone()[0]
         dimensions = self.meta("dimensions")
         return IndexStats(
             documents=sum(counts.values()), ok=counts.get("ok", 0),
             skipped=counts.get("skipped", 0), failed=counts.get("failed", 0),
-            chunks=chunks[0], embedded=chunks[1], vector_space=self.meta("vector_space"),
+            chunks=chunks[0], vector_space=self.meta("vector_space"),
             dimensions=int(dimensions) if dimensions else None, last_indexed_at=last)
 
     def document_text(self, content_hash: str) -> str | None:

@@ -387,3 +387,38 @@ def test_cli_sync_reports_the_attributes(agent_home, docs):
     assert "1 values dropped: a nested value (line 4 `court`)" in dry.stdout
     gone = runner.invoke(app, [*base, "source", "apply", "--kb", "legal", "--source", "docs"])
     assert gone.exit_code == 2  # the command no longer exists
+
+
+def test_kb_describe_shows_each_source_and_its_attributes(agent_home, docs):
+    from smartrag.cli.main import app
+    from smartrag.search.describe import describe_kb
+
+    publish(docs, ROWS, SCHEMA)
+    _sync(agent_home)
+    described = describe_kb(agent_home, "legal")
+    source = next(s for s in described.sources if s.source == "docs")
+    assert source.documents == 3 and source.file_types == {"md": 2, "txt": 1}
+    assert source.attributes is not None and source.attributes.rows == 2
+    assert source.attributes.folder == str(docs.parent / "docs.attributes")
+    keys = {k.name: k for k in source.attributes.keys}
+    assert list(keys) == ["title", "link", "court", "judge_date", "kind"]
+    assert (keys["court"].description, keys["court"].values) == (
+        "裁判所名", ["大阪地方裁判所", "東京地方裁判所"])
+    assert keys["judge_date"].format == "date" and keys["judge_date"].values is None
+    assert keys["kind"].enum == ["全文", "要旨"]
+
+    runner = CliRunner()
+    base = ["run", "--home", str(agent_home.root)]
+    text = runner.invoke(app, [*base, "kb", "describe", "--kb", "legal"])
+    assert text.exit_code == 0, text.output
+    assert "source docs" in text.stdout and "attributes  2 rows from" in text.stdout
+    assert f"path       {agent_home.kb_dir('legal')}" in text.stdout
+    assert "values: 大阪地方裁判所, 東京地方裁判所" in text.stdout
+    assert "judge_date  date" in text.stdout
+    data = runner.invoke(app, [*base, "--format", "json", "kb", "describe", "--kb", "legal"])
+    assert json.loads(data.stdout)["status"]["kb"] == "legal"
+
+    shutil.rmtree(docs.parent / "docs.attributes")
+    _sync(agent_home)
+    bare = runner.invoke(app, [*base, "kb", "describe", "--kb", "legal"])
+    assert "attributes  none (no attributes folder at the last sync)" in bare.stdout

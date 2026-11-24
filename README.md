@@ -98,6 +98,7 @@ smartrag version
 | [`kb set`](#kb-set) | Change a kb's description |
 | [`kb verify`](#kb-verify) | Test the kb's embedding provider with one request |
 | [`kb status`](#kb-status) | Show a kb's settings, index and warnings |
+| [`kb describe`](#kb-describe) | Show what a kb holds: its sources, documents and attributes |
 | [`kb remove`](#kb-remove) | Delete a kb |
 | [`kb sync`](#kb-sync) | Index the sources' new and changed files, remove deleted ones |
 | [`kb ingest`](#kb-ingest) | Copy files into the kb and index them |
@@ -194,8 +195,44 @@ Shows the kb's settings, sources, sink, index size and last sync, whether a comm
 lock, which environment variables it needs and whether they are set, and warnings. Makes no
 network calls.
 
+`vecspace` is the index's vector space, `model|dimensions|marking`: the model whose
+vectors these are (the original model's name, which an identical mirror shares), their
+length, and how a text is marked as a query or a document. Vectors can be compared only
+within one vecspace, so a kb can move to another model in the same vecspace and keep its
+vectors; any other move needs `kb reindex --rebuild`.
+
 ```sh
 smartrag run kb status --kb legal
+```
+
+#### `kb describe`
+
+```
+smartrag run kb describe --kb ID
+```
+
+Shows what the kb holds: its title, folder (`path`), model, index and description, then for
+each source its
+location, its documents by file type and file date, and the [attributes](#attributes) the
+last sync applied: the folder they came from, the number of rows, and each attribute with
+its type or format and its meaning from `schema.json`. A string or boolean attribute with
+at most 10 distinct values has them listed; `--format json` lists up to 50. Makes no
+network calls.
+
+```
+source data
+  location    file:///data/EDINET_DATA/rag/data
+  documents   36,063: md 36,017, pdf 46; modified 2022-10-13 to 2026-11-18
+  attributes  36,063 rows from /data/EDINET_DATA/rag/data.attributes, applied 2026-11-24T07:27:56+00:00
+    sec_code         string     4-character 証券コード, e.g. 9064 or 627A
+    fiscal_year_end  date       Last day of the fiscal year
+    doc_type         string     有価証券報告書 | 半期報告書 | 四半期報告書
+                                values: 半期報告書, 四半期報告書, 有価証券報告書
+```
+
+```sh
+smartrag run kb describe --kb legal
+smartrag run --format json kb describe --kb edinet
 ```
 
 #### `kb remove`

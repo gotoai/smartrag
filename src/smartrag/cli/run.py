@@ -161,6 +161,17 @@ def kb_status(ctx: typer.Context, kb: str = typer.Option(..., "--kb", help="The 
     invoke(state, lambda: state.home.status(kb), _render_kb_status)
 
 
+@kb_app.command("describe")
+def kb_describe(ctx: typer.Context,
+                kb: str = typer.Option(..., "--kb", help="The kb's id.")) -> None:
+    """Show what a kb holds: its basics, and per source its documents and the attributes the
+    last sync applied, with what each means. Makes no network calls."""
+    from smartrag.search.describe import describe_kb
+
+    state = _state(ctx)
+    invoke(state, lambda: describe_kb(state.home, kb), _render_kb_described)
+
+
 @kb_app.command("remove")
 def kb_remove(
     ctx: typer.Context,
@@ -631,7 +642,7 @@ def _render_kb_status(result: KbStatus) -> str:
         rows += [
             ["provider", result.embedding.provider_id if result.embedding else None],
             ["model", result.embedding.model_profile_id if result.embedding else None],
-            ["space", result.embedding.vector_space if result.embedding else None],
+            ["vecspace", result.embedding.vector_space if result.embedding else None],
             ["sources", result.sources],
             ["sink", f"{result.sink_files or 0} files, {human_bytes(result.sink_bytes or 0)}"],
             ["index", _index_line(index)],
@@ -644,6 +655,58 @@ def _render_kb_status(result: KbStatus) -> str:
     if result.warnings:
         text += "\n\nwarnings\n" + bullets(result.warnings)
     return text
+
+
+_LISTED_VALUES = 10
+"""Values printed after a key in `kb describe`'s text; JSON lists up to 50."""
+
+
+def _render_kb_described(result: Any) -> str:
+    from smartrag.search.describe import KbDescribed
+
+    assert isinstance(result, KbDescribed)
+    s = result.status
+    rows: list[list[object]] = [["kb", s.kb], ["title", s.title], ["kind", s.kind],
+                                 ["path", s.path]]
+    if s.remote is not None:
+        rows += [["endpoint", s.remote.endpoint], ["remote kb", s.remote.kb]]
+    elif s.embedding is not None:
+        rows += [["model", f"{s.embedding.provider_id} {s.embedding.model_profile_id}"],
+                 ["vecspace", s.embedding.vector_space], ["index", _index_line(s.index)]]
+    lines = [f"{label:<11}{value}" for label, value in rows]
+    description = s.description.strip()
+    lines += ["", "description"] + ([f"  {line}" for line in description.splitlines()]
+                                    if description else ["  (none)"])
+    for source in result.sources:
+        if source.source == "sink" and not source.documents:
+            continue
+        lines += ["", f"source {source.source}"]
+        if source.uri:
+            lines.append(f"  location    {source.uri}")
+        types = ", ".join(f"{t} {n:,}" for t, n in source.file_types.items())
+        dates = (f"; modified {source.modified_from} to {source.modified_to}"
+                 if source.modified_from else "")
+        lines.append(f"  documents   {source.documents:,}" + (f": {types}" if types else "")
+                     + dates)
+        a = source.attributes
+        if a is None:
+            lines.append("  attributes  none" + (" (no attributes folder at the last sync)"
+                                                 if source.uri else ""))
+            continue
+        lines.append(f"  attributes  {a.rows:,} rows from {a.folder}, applied {a.applied_at}")
+        width = max((len(k.name) for k in a.keys), default=0)
+        for key in a.keys:
+            kind = key.format or key.type or ""
+            lines.append(f"    {key.name:<{width}}  {kind:<9}  {key.description or ''}".rstrip())
+            values = key.values if key.values is not None else key.enum
+            if values and len(values) <= _LISTED_VALUES:
+                lines.append(f"    {'':<{width}}  {'':<9}  values: "
+                             + ", ".join(json.dumps(v, ensure_ascii=False) if not
+                                         isinstance(v, str) else v for v in values))
+            elif values:
+                lines.append(f"    {'':<{width}}  {'':<9}  {len(values)} values "
+                             "(listed with --format json)")
+    return "\n".join(lines)
 
 
 def _index_line(index: object) -> str:
