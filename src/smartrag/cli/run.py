@@ -725,7 +725,14 @@ def _render_sync(r: SyncReport) -> str:
                      f"to embed)")
     else:
         lines.append(f"chunks     {r.chunks_written:,} written: {r.chunks_embedded:,} embedded, "
-                     f"{r.chunks_reused:,} reused (about {r.tokens_estimated:,} tokens)")
+                     f"{r.chunks_reused:,} reused")
+        counted = r.tokens_embedded - r.tokens_embedded_estimated
+        lines.append(f"tokens     {r.tokens_embedded:,} embedded"
+                     + ("" if not r.tokens_embedded else
+                        " (counted by the provider)" if not r.tokens_embedded_estimated else
+                        " (estimated by Smart RAG)" if not counted else
+                        f" ({counted:,} counted by the provider, about "
+                        f"{r.tokens_embedded_estimated:,} estimated)"))
     t = r.timings_ms
     lines.append("time       " + ", ".join(f"{k} {v / 1000:.1f} s" for k, v in t.items())
                  + (f" (embed summed over up to {r.embedding_parallelism} requests in flight)"

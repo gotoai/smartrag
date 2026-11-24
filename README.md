@@ -235,10 +235,24 @@ are not read again. An interrupted sync (exit 130) continues where it stopped wh
 | `--refresh SECONDS` | `1` | How often the progress bar is redrawn (at least 0.1) |
 | `--exit-with-parent=true\|false` | `false` | `true`: stop cleanly when stdin closes. For a parent program that starts the sync and may exit, such as an agent application like Kari |
 
-Output: on a terminal, a progress bar on stderr (it counts files, so a large file holds it
-still while its chunks are embedded), then a summary. Not on a terminal: one line per
-document. With `--format json`: one JSON object per event, one per line, and the report as
-the last line.
+Output: on a terminal, a progress bar on stderr, then a summary:
+
+```
+[######----------------------------------]   15.5%  5600 / 36063  01:12:09 / 06:33:10  52.4M tokens  43.6M/h
+```
+
+That is files done / all files, time elapsed / estimated time left, the tokens sent for
+embedding so far and their rate per hour over the last stretch. The bar counts files, so a
+large file holds it still while its chunks are embedded. The tokens are the provider's own
+count; a provider that gives none is counted by Smart RAG's estimate, and the figure starts
+with `~`. Reused vectors cost nothing and are not counted. The summary's `tokens` line
+gives the total and says whether the provider counted it.
+
+Not on a terminal: one line per document, with its tokens
+(`[812/36063] data/yuho/…/S100U9OX.md: added, 157 chunks, 58,210 tokens`). With
+`--format json`: one JSON object per event, one per line (a `document` event carries
+`tokens` and `tokens_estimated`, the part of it Smart RAG estimated), and the report as the
+last line, with `tokens_embedded` and `tokens_embedded_estimated`.
 
 ```sh
 smartrag run kb sync --kb legal

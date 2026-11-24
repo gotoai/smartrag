@@ -41,13 +41,20 @@ import json
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from smartrag.chunking import CHUNKER_VERSION, TOKEN_ESTIMATOR, Chunk, chunk_units
-from smartrag.embedding.api import Embedder, EmbeddingSpec, open_embedder, resolve
+from smartrag.embedding.api import (
+    Embedder,
+    EmbeddingSpec,
+    Tokens,
+    embed_counted,
+    open_embedder,
+    resolve,
+)
 from smartrag.errors import ConfigError, EmbedderUnavailable, InvalidRequest, SmartRAGError
 from smartrag.extract.tabular import ExtractError
 from smartrag.extract.units import EXTRACTOR_VERSION, Extracted, extract
@@ -107,6 +114,7 @@ class _Pending:
     status: str
     embedded: int
     requests: int = 0
+    tokens: Tokens = field(default_factory=Tokens)
 
 
 class _Run:
@@ -138,6 +146,8 @@ class _Run:
         """The length of the vectors returned so far."""
         self._done = 0
         self._total = 0
+        self._written = Tokens()
+        """The tokens of the document just written, for its `document` event."""
 
     # --- reporting -----------------------------------------------------------------
 
@@ -177,9 +187,10 @@ class _Run:
         for listed in listing.files:
             seen.add(listed.rel)
             old = existing.get((target.source, listed.rel))
+            self._written = Tokens()
             result = self._file(target, listed, old)
             if result is not None:  # else its embedding requests are in flight
-                self._document_done(target.source, listed.rel, *result)
+                self._document_done(target.source, listed.rel, *result, self._written)
         while self.pool is not None and self.pool.in_flight:
             self._collect(block=True)
 
@@ -196,10 +207,14 @@ class _Run:
             info.removed = len(gone)
             self.report.counts.removed += len(gone)
 
-    def _document_done(self, source: str, path: str, status: str, chunks: int) -> None:
+    def _document_done(self, source: str, path: str, status: str, chunks: int,
+                       tokens: Tokens) -> None:
+        """`tokens`: what embedding the document's new chunks used; `tokens_estimated` is
+        the part of it Smart RAG estimated, for providers that give no count."""
         self._done += 1
         self._emit(event="document", source=source, path=path, status=status, chunks=chunks,
-                   n=self._done, total=self._total)
+                   n=self._done, total=self._total, tokens=tokens.total,
+                   tokens_estimated=tokens.estimated)
 
     def _file(self, target: SyncTarget, listed: ListedFile,
               old: DocumentRow | None) -> tuple[str, int] | None:
@@ -324,12 +339,14 @@ class _Run:
                 return None
             assert self.embedder is not None
             try:
-                self._take(needed, self.embedder.embed(needed_texts, "document"))
+                vectors, tokens = embed_counted(self.embedder, needed_texts, "document")
             finally:  # a failed request's time counts too
                 self.timings["embed"] += int((time.monotonic() - started) * 1000)
+            self._take(needed, vectors)
         else:
             self.timings["embed"] += int((time.monotonic() - started) * 1000)
-        self._write(_Pending(document, text, rows, status, len(needed)))
+            tokens = Tokens()
+        self._write(_Pending(document, text, rows, status, len(needed), tokens=tokens))
         return status, len(rows)
 
     def _write(self, pending: _Pending) -> None:
@@ -340,6 +357,9 @@ class _Run:
         self._count(pending.status, len(pending.rows))
         self.report.chunks_embedded += pending.embedded
         self.report.chunks_reused += len(pending.rows) - pending.embedded
+        self.report.tokens_embedded += pending.tokens.total
+        self.report.tokens_embedded_estimated += pending.tokens.estimated
+        self._written = pending.tokens
 
     def _count(self, status: str, chunks: int) -> None:
         if status == "updated":
@@ -372,14 +392,15 @@ class _Run:
         except EmbedderUnavailable as exc:  # a failed request's time counts too
             self.timings["embed"] += int(exc.details.get("took_ms", 0))
             raise
-        for (pending, rows), vectors, took_ms in finished:
+        for (pending, rows), vectors, tokens, took_ms in finished:
             self.timings["embed"] += took_ms
             self._take(rows, vectors)
+            pending.tokens += tokens
             pending.requests -= 1
             if not pending.requests:
                 self._write(pending)
                 self._document_done(pending.document.source_id, pending.document.rel_path,
-                                    pending.status, len(pending.rows))
+                                    pending.status, len(pending.rows), pending.tokens)
 
     def _take(self, rows: list[ChunkRow], vectors: list[list[float]]) -> None:
         """Give each row its vector, after checking they all have one length."""

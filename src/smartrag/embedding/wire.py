@@ -9,7 +9,10 @@
   field. `truncate: NONE` makes an over-long input an error, as everywhere else in Smart
   RAG, instead of Cohere's default of silently cutting its end.
 
-Both read errors from the usual shapes (`detail`, `error.message`, `message`).
+Both read errors from the usual shapes (`detail`, `error.message`, `message`), and the
+tokens the provider counted for the request: `usage.prompt_tokens` (or `total_tokens`) on
+the `openai` wire, `meta.billed_units.input_tokens` on `cohere_v2`. A provider that gives
+no count gets `None`, and the caller estimates instead.
 """
 
 from __future__ import annotations
@@ -30,6 +33,11 @@ def _dimensions(spec: EmbeddingSpec, body: dict[str, Any]) -> dict[str, Any]:
         assert spec.dialect.dimensions_field is not None
         body[spec.dialect.dimensions_field] = spec.request_dimensions
     return body
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 \
+        else None
 
 
 def _checked(vectors: Any, count: int) -> list[list[float]]:
@@ -63,6 +71,14 @@ class OpenAIWire:
                          for item in ordered], count)
 
     @staticmethod
+    def tokens(answer: Any) -> int | None:
+        usage = answer.get("usage") if isinstance(answer, dict) else None
+        if not isinstance(usage, dict):
+            return None
+        counted = _count(usage.get("prompt_tokens"))
+        return counted if counted is not None else _count(usage.get("total_tokens"))
+
+    @staticmethod
     def error_detail(raw: str) -> str:
         return error_detail(raw)
 
@@ -82,6 +98,12 @@ class CohereV2Wire:
             raise EmbedderUnavailable("the embedding endpoint's answer has no "
                                       "`embeddings.float` list")
         return _checked(embeddings["float"], count)
+
+    @staticmethod
+    def tokens(answer: Any) -> int | None:
+        meta = answer.get("meta") if isinstance(answer, dict) else None
+        billed = meta.get("billed_units") if isinstance(meta, dict) else None
+        return _count(billed.get("input_tokens")) if isinstance(billed, dict) else None
 
     @staticmethod
     def error_detail(raw: str) -> str:

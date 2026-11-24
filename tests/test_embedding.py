@@ -9,10 +9,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from smartrag.chunking import estimate_tokens
 from smartrag.embedding import transport
-from smartrag.embedding.api import open_embedder, resolve
+from smartrag.embedding.api import embed_counted, open_embedder, resolve
 from smartrag.embedding.catalog import catalog, provider_list
-from smartrag.embedding.engine import HttpEmbedder
+from smartrag.embedding.engine import HttpEmbedder, Tokens
 from smartrag.embedding.wire import CohereV2Wire, OpenAIWire
 from smartrag.errors import ConfigError, EmbedderUnavailable
 from smartrag.kb.config import EmbeddingConfig, KbConfig
@@ -24,11 +25,11 @@ def endpoint():
     and body. `require` makes it answer 401 to any other key, as OumiGo's router does;
     `fail` lists statuses to answer, in turn, before succeeding; `dims` sets the vector
     length; `max_inputs` answers 429 to bigger requests; `echo` makes each vector start
-    with its text's length."""
+    with its text's length; `usage` counts each text's characters as its tokens."""
     seen: list[str | None] = []
     bodies: list[dict] = []
     state: dict = {"require": None, "fail": [], "retry_after": None, "dims": 2,
-                   "max_inputs": None, "echo": False}
+                   "max_inputs": None, "echo": False, "usage": False}
 
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, status: int, body: object, headers: dict | None = None) -> None:
@@ -69,9 +70,12 @@ def endpoint():
                             {"Retry-After": state["retry_after"]} if state["retry_after"]
                             else None)
                 return
+            usage = ({"usage": {"prompt_tokens": sum(map(len, texts)),
+                                "total_tokens": sum(map(len, texts))}} if state["usage"] else {})
             self._reply(200, {"data": [
                 {"index": i, "embedding": ([float(len(texts[i]))] if state["echo"] else [1.0])
-                 + [1.0] * (state["dims"] - 1)} for i in reversed(range(len(texts)))]})
+                 + [1.0] * (state["dims"] - 1)} for i in reversed(range(len(texts)))],
+                **usage})
 
         def log_message(self, *args: object) -> None:
             pass
@@ -368,3 +372,39 @@ def test_a_401_without_a_key_says_no_key_was_sent(endpoint):
                        match=r"no API key was sent \(\$\{KEY\} is empty") as caught:
         open_embedder(_custom(url), environ={"KEY": ""}, attempts=1).verify()
     assert caught.value.details["kind"] == "auth"
+
+
+# --- tokens used ---------------------------------------------------------------------
+
+
+def test_wires_read_the_provider_s_token_count():
+    assert OpenAIWire.tokens({"usage": {"prompt_tokens": 12, "total_tokens": 12}}) == 12
+    assert OpenAIWire.tokens({"usage": {"total_tokens": 9}}) == 9  # Voyage
+    assert OpenAIWire.tokens({"data": []}) is None
+    assert OpenAIWire.tokens({"usage": {"prompt_tokens": True}}) is None
+    assert OpenAIWire.tokens({"usage": {"prompt_tokens": -1}}) is None
+    assert CohereV2Wire.tokens({"meta": {"billed_units": {"input_tokens": 30}}}) == 30
+    assert CohereV2Wire.tokens({"meta": {}}) is None
+
+
+def test_the_embedder_counts_tokens_or_estimates_them(endpoint):
+    url, _seen, _bodies, state = endpoint
+    embedder = HttpEmbedder(resolve(_custom(url, batch_size=2)), environ={"KEY": "k"})
+    texts = ["有給休暇", "経費精算の締め日", "abc"]
+    assert embedder.embed_counted(texts, "document")[1] == Tokens(
+        estimated=sum(estimate_tokens(t) for t in texts))
+    state["usage"] = True
+    vectors, tokens = embedder.embed_counted(texts, "document")
+    assert len(vectors) == 3 and tokens == Tokens(counted=4 + 8 + 3)  # two requests summed
+    assert embed_counted(_Plain(), texts, "query")[1].estimated == tokens_of(texts)
+
+
+class _Plain:
+    """An embedder that cannot count."""
+
+    def embed(self, texts, side):
+        return [[1.0, 0.0] for _ in texts]
+
+
+def tokens_of(texts):
+    return sum(estimate_tokens(t) for t in texts)

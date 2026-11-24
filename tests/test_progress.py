@@ -6,7 +6,7 @@ import io
 
 import pytest
 
-from smartrag.cli.progress import ProgressBar, clock, render
+from smartrag.cli.progress import ProgressBar, amount, clock, progress_lines, render
 
 
 def test_render_matches_the_documented_line():
@@ -26,10 +26,39 @@ def test_clock_hours_grow_past_a_day():
     assert clock(100 * 3600 + 61) == "100:01:01"
 
 
+def test_render_shows_tokens_and_their_rate():
+    line = render(1000, 330000, 939, None, columns=200, tokens=52_400_000,
+                  per_hour=43_600_000)
+    assert line.endswith("00:15:39 / --:--:--  52.4M tokens  43.6M/h")
+    assert render(1, 2, 0, None, columns=200, tokens=812, approximate=True).endswith(
+        "  ~812 tokens")
+    assert [amount(n) for n in (0, 999, 52_400, 1_650_000_000)] == ["0", "999", "52.4k",
+                                                                     "1.65B"]
+    # a narrow terminal loses the rate first, then the tokens, so the line never wraps
+    for columns in (60, 75, 80, 120):
+        line = render(5600, 36063, 4329, 23590, columns=columns, tokens=52_400_000,
+                      per_hour=43_600_000)
+        assert len(line) <= columns
+    assert "tokens" in render(5600, 36063, 4329, 23590, columns=100, tokens=52_400_000,
+                              per_hour=43_600_000)
+
+
+def test_the_token_rate_uses_the_window_of_the_time_estimate():
+    bar = ProgressBar(stream=io.StringIO())
+    bar.total, bar.started = 1000, 0.0
+    bar._samples.extend([(0.0, 0, 0), (1.0, 50, 0), (40.0, 63, 1_300_000)])
+    bar.done, bar.tokens = 73, 2_300_000
+    bar._samples.append((70.0, 73, 2_300_000))
+    assert bar.per_hour(70.0) is None  # no time estimate has been worked out yet
+    bar.remaining(70.0)
+    # from the sample at 40 s: 1M tokens in 30 s; the fast start at 1 s is left out
+    assert bar.per_hour(70.0) == pytest.approx(1_000_000 / 30 * 3600)
+
+
 def _bar(total: int, samples: list[tuple[float, int]]) -> ProgressBar:
     bar = ProgressBar(stream=io.StringIO())
     bar.total, bar.started = total, 0.0
-    bar._samples.extend(samples)
+    bar._samples.extend((when, done, 0) for when, done in samples)
     bar.done = samples[-1][1]
     return bar
 
@@ -56,7 +85,7 @@ def test_estimate_counts_down_between_updates_and_ends_at_zero():
     assert bar.remaining(40.0) == 3960
     bar.done = 500  # a much faster stretch does not move the estimate before 30 s pass
     assert bar.remaining(50.0) == 3950
-    bar._samples.append((70.0, 500))
+    bar._samples.append((70.0, 500, 0))
     assert bar.remaining(70.0) == pytest.approx(500 * 30 / 490)  # recomputed at 70 s: 490 files in 30 s
     bar.done = 1000
     assert bar.remaining(71.0) == 0.0
@@ -71,6 +100,30 @@ def test_bar_draws_on_plan_and_ends_its_line_on_close():
     text = out.getvalue()
     assert text.startswith("\r[") and text.endswith("\n")
     assert "100.0%  2 / 2" in text.splitlines()[-1]
+
+
+def test_documents_add_their_tokens_and_an_estimate_marks_the_total():
+    out = io.StringIO()
+    with ProgressBar(interval=60, stream=out) as bar:
+        bar({"event": "plan", "files": 3})
+        bar({"event": "document", "status": "added", "tokens": 1500, "tokens_estimated": 0})
+        assert not bar.approximate
+        bar({"event": "document", "status": "unchanged", "tokens": 0, "tokens_estimated": 0})
+        bar({"event": "document", "status": "added", "tokens": 700, "tokens_estimated": 700})
+    assert bar.tokens == 2200 and bar.approximate
+    assert out.getvalue().splitlines()[-1].rstrip().endswith("~2.20k tokens")
+
+
+def test_lines_without_a_terminal_carry_each_document_s_tokens(capsys):
+    event = {"event": "document", "n": 3, "total": 9, "source": "docs", "path": "a.md",
+             "status": "added", "chunks": 4}
+    progress_lines({**event, "tokens": 1234, "tokens_estimated": 0})
+    progress_lines({**event, "tokens": 1234, "tokens_estimated": 1234})
+    progress_lines({**event, "status": "updated", "tokens": 0, "tokens_estimated": 0})
+    assert capsys.readouterr().err.splitlines() == [
+        "[3/9] docs/a.md: added, 4 chunks, 1,234 tokens",
+        "[3/9] docs/a.md: added, 4 chunks, about 1,234 tokens",
+        "[3/9] docs/a.md: updated, 4 chunks"]
 
 
 def test_no_plan_no_bar():

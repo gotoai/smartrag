@@ -2,7 +2,8 @@
 
 Only the requests run in parallel. The main process still lists, extracts and chunks
 serially, and alone reads and writes the index; a worker gets a batch of texts and
-returns their vectors, with no index connection and no shared state.
+returns their vectors and the tokens they used, with no index connection and no shared
+state.
 
 * Processes, not threads, started with `spawn` on every OS, so Linux, macOS and Windows
   behave alike.
@@ -27,7 +28,7 @@ from concurrent import futures
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any
 
-from smartrag.embedding.api import Embedder
+from smartrag.embedding.api import Embedder, Tokens, embed_counted
 from smartrag.embedding.transport import OnWait
 from smartrag.errors import EmbedderUnavailable
 
@@ -35,11 +36,13 @@ _EVENT_POLL = 0.2
 """Seconds between looks at the wait queue while blocked on requests."""
 
 Vectors = list[list[float]]
+_Result = tuple[Vectors | None, Tokens, str | None, int]
+"""A request's vectors (None if it failed), tokens, error message and milliseconds."""
 
 
 class EmbedPool:
     """At most `parallelism` embedding requests in flight. Each request carries a `tag`,
-    which `wait` returns with the request's vectors."""
+    which `wait` returns with the request's vectors and tokens."""
 
     def __init__(self, embedder: Embedder, parallelism: int,
                  on_wait: OnWait | None = None) -> None:
@@ -51,7 +54,7 @@ class EmbedPool:
         self._calm = 0
         self._executor: futures.ProcessPoolExecutor | None = None
         self._events: Any = None
-        self._requests: dict[futures.Future[tuple[Vectors | None, str | None, int]], Any] = {}
+        self._requests: dict[futures.Future[_Result], Any] = {}
 
     @property
     def in_flight(self) -> int:
@@ -67,9 +70,9 @@ class EmbedPool:
                 initializer=_start_worker, initargs=(self.embedder, self._events))
         self._requests[self._executor.submit(_embed, texts)] = tag
 
-    def wait(self, *, block: bool) -> list[tuple[Any, Vectors, int]]:
-        """The requests that have finished, as (tag, vectors, milliseconds); with `block`,
-        waits for at least one. A failed request raises `EmbedderUnavailable`."""
+    def wait(self, *, block: bool) -> list[tuple[Any, Vectors, Tokens, int]]:
+        """The requests that have finished, as (tag, vectors, tokens, milliseconds); with
+        `block`, waits for at least one. A failed request raises `EmbedderUnavailable`."""
         if not self._requests:
             return []
         while True:
@@ -79,18 +82,18 @@ class EmbedPool:
             self._drain()
             if done or not block:
                 break
-        finished: list[tuple[Any, Vectors, int]] = []
+        finished: list[tuple[Any, Vectors, Tokens, int]] = []
         for request in done:
             tag = self._requests.pop(request)
             try:
-                vectors, error, took_ms = request.result()
+                vectors, tokens, error, took_ms = request.result()
             except BrokenProcessPool:
                 raise EmbedderUnavailable("an embedding worker process stopped "
                                           "unexpectedly") from None
             if error is not None:
                 raise EmbedderUnavailable(error, details={"took_ms": took_ms})
             assert vectors is not None
-            finished.append((tag, vectors, took_ms))
+            finished.append((tag, vectors, tokens, took_ms))
             self._calm += 1
             if self._calm >= self.limit and self.limit < self.parallelism:
                 self.limit += 1
@@ -151,14 +154,16 @@ def _exit_with(parent: multiprocessing.process.BaseProcess) -> None:
     os._exit(1)
 
 
-def _embed(texts: list[str]) -> tuple[Vectors | None, str | None, int]:
+def _embed(texts: list[str]) -> _Result:
     """One request. A failure comes back as its message: Smart RAG's errors do not keep
     their details through pickling."""
     assert _embedder is not None
     started = time.monotonic()
+    vectors: Vectors | None = None
+    tokens = Tokens()
     try:
-        vectors = _embedder.embed(texts, "document")
+        vectors, tokens = embed_counted(_embedder, texts, "document")
         error = None
     except EmbedderUnavailable as exc:
-        vectors, error = None, exc.message
-    return vectors, error, int((time.monotonic() - started) * 1000)
+        error = exc.message
+    return vectors, tokens, error, int((time.monotonic() - started) * 1000)

@@ -77,7 +77,8 @@ class _Endpoint:
                     self._reply(400, {"detail": "rejected"})
                     return
                 self._reply(200, {"data": [{"index": i, "embedding": _vector(t)}
-                                           for i, t in enumerate(texts)]})
+                                           for i, t in enumerate(texts)],
+                                  "usage": {"prompt_tokens": sum(map(len, texts))}})
 
             def log_message(self, *args: object) -> None:
                 pass
@@ -150,6 +151,10 @@ def test_parallel_sync_builds_the_same_index_as_serial(tmp_path, endpoint, docs)
     documents = [e for e in events if e["event"] == "document" and e["source"] == "docs"]
     assert sorted(e["path"] for e in documents) == sorted(p.name for p in docs.iterdir())
     assert [e["n"] for e in documents] == list(range(1, len(documents) + 1))
+    # the tokens the endpoint counted, from the worker processes, per document and in all
+    assert parallel.tokens_embedded == serial.tokens_embedded > 0
+    assert parallel.tokens_embedded_estimated == 0
+    assert sum(e["tokens"] for e in documents) == parallel.tokens_embedded
 
     endpoint.requests = 0
     again = sync_kb(home, "parallel")

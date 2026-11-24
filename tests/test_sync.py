@@ -67,6 +67,22 @@ def test_first_sync_indexes_and_records_skips(home, docs):
         assert json.load(handle)["kb"] == "legal"
 
 
+def test_tokens_embedded_count_only_new_chunks(home, docs):
+    from smartrag.cli.run import _render_sync
+
+    add_source(home, "legal", "docs", str(docs))
+    events: list[dict] = []
+    report = sync_kb(home, "legal", embedder=FakeEmbedder(), progress=events.append)
+    # an embedder that cannot count: everything sent is Smart RAG's estimate
+    assert report.tokens_embedded == report.tokens_embedded_estimated > 0
+    documents = [e for e in events if e["event"] == "document"]
+    assert sum(e["tokens"] for e in documents) == report.tokens_embedded
+    assert "(estimated by Smart RAG)" in _render_sync(report)
+    (docs / "notes.md").write_text("# Notes\n\nA changed note.\n", encoding="utf-8")
+    again = sync_kb(home, "legal", embedder=FakeEmbedder())
+    assert 0 < again.tokens_embedded < report.tokens_embedded  # the unchanged file costs none
+
+
 def test_text_files_without_an_extractor_are_indexed_and_binaries_skipped(home, docs):
     (docs / "tool.py").write_text("def 休暇():\n    return '年休'\n", encoding="utf-8")
     (docs / "blob.dat").write_bytes(b"\x00" * 64)

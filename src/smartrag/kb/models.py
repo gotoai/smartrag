@@ -259,6 +259,13 @@ class SyncReport(BaseModel):
     chunks_embedded: int = 0
     chunks_reused: int = 0
     tokens_estimated: int = 0
+    """Smart RAG's estimate of the chunk text in the files processed this run, embedded or
+    reused; for a dry run, what would be embedded."""
+    tokens_embedded: int = 0
+    """Tokens sent for embedding: the provider's count where its answers gave one, else
+    Smart RAG's estimate. Reused vectors cost nothing and are not counted."""
+    tokens_embedded_estimated: int = 0
+    """The part of `tokens_embedded` that Smart RAG estimated."""
     timings_ms: dict[str, int] = Field(default_factory=dict)
     issues: list[SyncIssue] = Field(default_factory=list)
     issues_total: int = 0
